@@ -21,11 +21,18 @@
   align-items: center;
   gap: 16px;
   margin-bottom: 24px;
+  flex-wrap: wrap;
 }
 
 .dash-header h1 { margin: 0; }
 .dash-header p { margin: 4px 0 0; color: #6b7280; }
-.dash-header nav { display: flex; gap: 12px; align-items: center; }
+.dash-header nav {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 .dash-header > nav > a,
 .dash-header > nav > button,
 .linkish {
@@ -37,11 +44,12 @@
   text-decoration: none;
   color: inherit;
   font-family: inherit;
+  white-space: nowrap;
 }
 
 .stat-row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 12px;
   margin-bottom: 20px;
 }
@@ -158,7 +166,7 @@
 
 .poll-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
 .poll-card { border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px; }
-.poll-meta { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.poll-meta { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
 .poll-options { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .report-list { list-style: none; padding: 0; margin: 0; }
@@ -182,6 +190,7 @@
   justify-content: space-between;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
 }
 .report-hit p { margin: 4px 0; color: #6b7280; font-size: 13px; }
 
@@ -190,6 +199,7 @@
   font-size: 12px;
   padding: 2px 8px;
   border-radius: 999px;
+  white-space: nowrap;
 }
 .badge-pending { background: #fef3c7; color: #92400e; }
 .badge-in_progress { background: #dbeafe; color: #1e40af; }
@@ -212,6 +222,7 @@
   gap: 12px;
   margin-bottom: 8px;
   font-size: 13px;
+  flex-wrap: wrap;
 }
 .map-legend i {
   display: inline-block;
@@ -234,6 +245,7 @@
   justify-content: space-between;
   gap: 12px;
   align-items: center;
+  flex-wrap: wrap;
 }
 .detail-meta { padding-left: 18px; color: #374151; }
 
@@ -284,10 +296,7 @@
   z-index: 30;
   padding: 8px;
 }
-.bell-panel header {
-  font-weight: 600;
-  padding: 8px;
-}
+.bell-panel header { font-weight: 600; padding: 8px; }
 .bell-panel ul { list-style: none; margin: 0; padding: 0; }
 .bell-panel a {
   display: block;
@@ -299,7 +308,121 @@
 .bell-panel a:hover { background: #f8fafc; }
 .bell-panel a span { display: block; color: #6b7280; font-size: 12px; }
 
-@media (max-width: 800px) {
-  .charts-grid, .split, .coord-row { grid-template-columns: 1fr; }
-  .btn-location { width: 100%; }
+/* ─── RESPONSIVE ──────────────────────────────────────────────── */
+
+/* Tablet (≤768px) */
+@media (max-width: 768px) {
+  .dash {
+    padding: 16px 12px 48px;
+  }
+
+  .charts-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .chart-wide {
+    grid-column: 1;
+  }
+
+  .split {
+    grid-template-columns: 1fr;
+  }
+
+  .stat-card strong {
+    font-size: 22px;
+  }
+
+  .dash-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .dash-header nav {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .bell-panel {
+    width: 290px;
+  }
+}
+
+/* Mobile (≤480px) */
+@media (max-width: 480px) {
+  .dash {
+    padding: 12px 10px 40px;
+  }
+
+  .stat-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .stat-card {
+    padding: 12px;
+  }
+
+  .stat-card strong {
+    font-size: 20px;
+  }
+
+  .stat-card span {
+    font-size: 11px;
+  }
+
+  .coord-row {
+    grid-template-columns: 1fr;
+  }
+
+  .btn-location {
+    width: 100%;
+    height: 42px;
+  }
+
+  .panel {
+    padding: 12px;
+    border-radius: 10px;
+  }
+
+  .report-hit > div {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .poll-options {
+    flex-direction: column;
+  }
+
+  .btn-option {
+    width: 100%;
+    text-align: left;
+  }
+
+  .status-actions {
+    flex-direction: column;
+  }
+
+  .status-actions button {
+    width: 100%;
+    padding: 8px;
+  }
+
+  .bell-panel {
+    width: calc(100vw - 2rem);
+    right: -80px;
+  }
+
+  .admin-table th,
+  .admin-table td {
+    padding: 6px 4px;
+    font-size: 12px;
+  }
+
+  .dash-header > nav > a,
+  .dash-header > nav > button,
+  .linkish {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
 }

@@ -701,3 +701,138 @@ body {
   padding: 6px 8px;
   font-size: 12px;
 }
+
+/* ─── RESPONSIVE ────────────────────────────────────────────── */
+
+/* Tablet */
+@media (max-width: 768px) {
+  .auth-card {
+    padding: 1.75rem 1.25rem;
+  }
+
+  .dash-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .user-info {
+    flex-wrap: wrap;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .notif-panel {
+    width: 300px;
+    right: -60px;
+  }
+
+  .admin-tabs {
+    gap: 6px;
+  }
+
+  .admin-tab {
+    font-size: 12px;
+    padding: 6px 10px;
+  }
+
+  .admin-user-table {
+    font-size: 12px;
+  }
+
+  .admin-user-table th,
+  .admin-user-table td {
+    padding: 8px 8px;
+  }
+
+  .report-card-admin {
+    flex-direction: column;
+  }
+
+  .name-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Mobile */
+@media (max-width: 480px) {
+  .auth-page {
+    padding: 1rem;
+    align-items: flex-start;
+    padding-top: 2rem;
+  }
+
+  .auth-card {
+    padding: 1.5rem 1rem;
+    border-radius: 12px;
+  }
+
+  .brand h1 {
+    font-size: 20px;
+  }
+
+  .btn-primary {
+    font-size: 15px;
+    padding: 13px;
+  }
+
+  .notif-panel {
+    width: calc(100vw - 2rem);
+    right: -100px;
+  }
+
+  .notif-bell-btn {
+    width: 36px;
+    height: 36px;
+  }
+
+  .user-info {
+    font-size: 12px;
+  }
+
+  .role-badge {
+    font-size: 10px;
+    padding: 2px 6px;
+  }
+
+  .status-pill {
+    font-size: 10px;
+  }
+
+  .assign-row {
+    flex-direction: column;
+  }
+
+  .assign-row select {
+    width: 100%;
+  }
+
+  .admin-user-table thead {
+    display: none;
+  }
+
+  .admin-user-table tr {
+    display: block;
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px;
+  }
+
+  .admin-user-table td {
+    display: flex;
+    justify-content: space-between;
+    border: none;
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+
+  .admin-user-table td::before {
+    content: attr(data-label);
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+  }
+}
