@@ -1,7 +1,6 @@
 @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600&family=DM+Sans:wght@300;400;500&display=swap');
 
 :root {
-  /* Light civic theme */
   --bg: #f3f5f9;
   --surface: #ffffff;
   --surface2: #eef1f6;
@@ -440,6 +439,7 @@ body {
   color: var(--muted);
   font-size: 14px;
 }
+
 /* ─── Notification Bell ─────────────────────────────────────── */
 .notif-bell {
   position: relative;
@@ -536,10 +536,28 @@ body {
   gap: 12px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--border);
+  align-items: center;
 }
 
 .notif-item:last-child {
   border-bottom: none;
+}
+
+.notif-item--clickable {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.notif-item--clickable:hover {
+  background: var(--surface2);
+}
+
+.notif-arrow {
+  font-size: 18px;
+  color: var(--muted);
+  margin-left: auto;
+  padding-left: 8px;
+  flex-shrink: 0;
 }
 
 .notif-icon {
@@ -573,7 +591,7 @@ body {
   opacity: 0.7;
 }
 
-/* ─── Admin Panel Improvements ──────────────────────────────── */
+/* ─── Admin Panel ────────────────────────────────────────────── */
 .admin-tabs {
   display: flex;
   gap: 8px;
@@ -661,10 +679,10 @@ body {
   text-transform: uppercase;
 }
 
-.status-pill.pending { background: #fef3c7; color: #92400e; }
-.status-pill.assigned { background: #dbeafe; color: #1e40af; }
+.status-pill.pending    { background: #fef3c7; color: #92400e; }
+.status-pill.assigned   { background: #dbeafe; color: #1e40af; }
 .status-pill.in_progress { background: #e0e7ff; color: #3730a3; }
-.status-pill.resolved { background: #d1fae5; color: #065f46; }
+.status-pill.resolved   { background: #d1fae5; color: #065f46; }
 
 .assign-row {
   display: flex;
