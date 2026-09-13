@@ -1,0 +1,74 @@
+/* client/src/components/AdminAnalytics.css */
+
+/* ── Grid layout ─────────────────────────────────────────── */
+.admin-analytics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1.5rem;
+  margin-top: 1.5rem;
+}
+
+/* Full-width card (used for Wards chart) */
+.chart-wrapper--full {
+  grid-column: 1 / -1;
+}
+
+/* ── Card ─────────────────────────────────────────────────── */
+.chart-wrapper {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  border-radius: 16px;
+  padding: 1.5rem;
+  box-shadow:
+    0 4px 6px -1px rgba(0, 0, 0, 0.07),
+    0 2px 4px -2px rgba(0, 0, 0, 0.05);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.chart-wrapper:hover {
+  box-shadow:
+    0 10px 24px -4px rgba(79, 70, 229, 0.12),
+    0 4px 8px -2px rgba(0, 0, 0, 0.06);
+  transform: translateY(-2px);
+}
+
+/* ── Title ─────────────────────────────────────────────────── */
+.chart-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #1e293b;
+  margin: 0 0 1rem 0;
+  padding-bottom: 0.6rem;
+  border-bottom: 2px solid #e2e8f0;
+  letter-spacing: -0.01em;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.chart-hint {
+  font-size: 12px;
+  color: #64748b;
+  margin: -0.5rem 0 0.75rem;
+}
+
+/* ── Dark mode ─────────────────────────────────────────────── */
+@media (prefers-color-scheme: dark) {
+  .chart-wrapper {
+    background: rgba(30, 41, 59, 0.85);
+    border-color: rgba(71, 85, 105, 0.6);
+  }
+  .chart-title {
+    color: #f1f5f9;
+    border-bottom-color: rgba(71, 85, 105, 0.6);
+  }
+}
+
+/* ── Responsive ─────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .admin-analytics-grid {
+    grid-template-columns: 1fr;
+  }
+}

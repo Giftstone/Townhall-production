@@ -1,0 +1,18 @@
+-- ============================================================
+-- Townhall Database Seeds
+-- ============================================================
+-- Prefer running the Node seed script (it hashes passwords correctly):
+--
+--   cd server
+--   node scripts/seed.js
+--
+-- The script creates:
+--   • 5 wards with deficit indexes
+--   • 1 administrator
+--   • 4 emergency responders
+--   • 10 citizens
+--   • Sample reports (pending / in_progress / resolved)
+--   • Sample polls + votes
+--
+-- Default password for ALL seeded users:  Password123!
+-- ============================================================
