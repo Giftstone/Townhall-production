@@ -58,6 +58,12 @@ export default function Dashboard() {
   const { reports, loading: repLoading, createReport, updateStatus, setReports } = useReports(token);
   const { polls, loading: pollLoading, createPoll, castVote } = usePolls(token);
 
+  // ── Search fix: separate display state so search never corrupts source ──
+  const [displayedReports, setDisplayedReports] = useState([]);
+  useEffect(() => {
+    setDisplayedReports(Array.isArray(reports) ? reports : []);
+  }, [reports]);
+
   if (authLoading) {
     return (
       <div className="loading-screen">
@@ -79,7 +85,8 @@ export default function Dashboard() {
     );
   }
 
-  const safeReports = Array.isArray(reports) ? reports : [];
+  const safeReports = displayedReports;
+  const sourceReports = Array.isArray(reports) ? reports : [];
   const safePolls = Array.isArray(polls) ? polls : [];
 
   return (
@@ -127,7 +134,8 @@ export default function Dashboard() {
           castVote={castVote}
         />
 
-        <ReportSearch reports={safeReports} setReports={setReports} />
+        {/* Search gets SOURCE reports, writes to displayedReports */}
+        <ReportSearch reports={sourceReports} setReports={setDisplayedReports} />
 
         {/* Role workspaces (forms / admin tools) */}
         {user.role === 'administrator' && (
@@ -202,9 +210,11 @@ function ReportsListPanel({ reports, loading }) {
   );
 }
 
-// --- POLLS PANEL (With Options) ---
+// --- POLLS PANEL (With Options + optional images) ---
 function PollsPanel({ polls, loading, createPoll, castVote }) {
   const [form, setForm] = useState({ category: 'roads', description: '', options: ['', ''] });
+  const [pollImageFiles, setPollImageFiles] = useState([]);
+  const [pollImagePreviews, setPollImagePreviews] = useState([]);
 
   const handleAddOption = () => setForm({ ...form, options: [...form.options, ''] });
   const handleOptionChange = (index, value) => {
@@ -217,11 +227,19 @@ function PollsPanel({ polls, loading, createPoll, castVote }) {
     e.preventDefault();
     const validOptions = form.options.filter(opt => opt.trim() !== '');
     if (validOptions.length < 2) return toast.error('Please provide at least 2 options');
-    
+
     try {
-      await createPoll({ ...form, options: validOptions });
+      await createPoll(
+        { ...form, options: validOptions },
+        pollImageFiles.length ? pollImageFiles : undefined
+      );
       toast.success('Poll proposed!');
       setForm({ category: 'roads', description: '', options: ['', ''] });
+      pollImagePreviews.forEach((url) => {
+        try { URL.revokeObjectURL(url); } catch (_) {}
+      });
+      setPollImageFiles([]);
+      setPollImagePreviews([]);
     } catch (err) { toast.error(err.message); }
   };
 
@@ -263,6 +281,41 @@ function PollsPanel({ polls, loading, createPoll, castVote }) {
             <IconPlus size={14} /> Add Option
           </button>
         </div>
+        <div className="form-group">
+          <label>Optional images (max 5)</label>
+          <input
+            type="file"
+            accept="image/*"
+            multiple
+            onChange={(e) => {
+              const selected = Array.from(e.target.files || []);
+              const valid = selected.filter((f) => {
+                if (f.size > 5 * 1024 * 1024) {
+                  toast.error(`${f.name} is larger than 5MB`);
+                  return false;
+                }
+                return true;
+              }).slice(0, 5);
+              pollImagePreviews.forEach((url) => {
+                try { URL.revokeObjectURL(url); } catch (_) {}
+              });
+              setPollImageFiles(valid);
+              setPollImagePreviews(valid.map((f) => URL.createObjectURL(f)));
+            }}
+          />
+          {pollImagePreviews.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+              {pollImagePreviews.map((src, i) => (
+                <img
+                  key={i}
+                  src={src}
+                  alt={`Poll preview ${i + 1}`}
+                  style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 8, border: '1px solid var(--border)' }}
+                />
+              ))}
+            </div>
+          )}
+        </div>
         <button type="submit" className="btn-primary btn-with-icon">
           <IconPoll size={16} /> Propose Poll
         </button>
@@ -277,7 +330,20 @@ function PollsPanel({ polls, loading, createPoll, castVote }) {
                 <span>{p.total_votes} votes</span>
               </div>
               <p className="poll-desc">{p.description}</p>
-              
+
+              {Array.isArray(p.image_urls) && p.image_urls.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: '0.75rem' }}>
+                  {p.image_urls.map((src, i) => (
+                    <img
+                      key={i}
+                      src={`${API_URL}${src}`}
+                      alt={`Poll image ${i + 1}`}
+                      style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 8, border: '1px solid var(--border)' }}
+                    />
+                  ))}
+                </div>
+              )}
+
               {(() => {
                 const options = p.options ?? [];
                 const counts = p.option_counts ?? options.map(() => 0);
@@ -657,8 +723,8 @@ function CitizenPanel({ reports, loading, createReport, createPoll }) {
   const [locating, setLocating] = useState(false);
   const [attachPoll, setAttachPoll] = useState(false);
   const [pollOptions, setPollOptions] = useState(['Yes — this needs attention', 'No — not a priority']);
-  const [imageFile, setImageFile] = useState(null);
-  const [imagePreview, setImagePreview] = useState('');
+  const [imageFiles, setImageFiles] = useState([]);
+  const [imagePreviews, setImagePreviews] = useState([]);
 
   const mapReportCategoryToPoll = (cat) => {
     const m = {
@@ -706,7 +772,7 @@ function CitizenPanel({ reports, loading, createReport, createPoll }) {
       if (valid.length < 2) return toast.error('Poll needs at least 2 options (or turn off "Add a poll")');
     }
     try {
-      const created = await createReport(form, imageFile || undefined);
+      const created = await createReport(form, imageFiles.length ? imageFiles : undefined);
       if (attachPoll && createPoll) {
         const valid = pollOptions.map((o) => o.trim()).filter(Boolean);
         await createPoll({
@@ -724,8 +790,11 @@ function CitizenPanel({ reports, loading, createReport, createPoll }) {
       setFlyTo(null);
       setAttachPoll(false);
       setPollOptions(['Yes — this needs attention', 'No — not a priority']);
-      setImageFile(null);
-      setImagePreview('');
+      imagePreviews.forEach((url) => {
+        try { URL.revokeObjectURL(url); } catch (_) {}
+      });
+      setImageFiles([]);
+      setImagePreviews([]);
     } catch (err) { toast.error(err.message); }
   };
 
@@ -877,41 +946,70 @@ function CitizenPanel({ reports, loading, createReport, createPoll }) {
         <div className="form-group" style={{ borderTop: '1px solid var(--border)', paddingTop: '1rem', marginTop: '0.5rem' }}>
           <label className="label-with-icon">Optional photo evidence</label>
           <p className="muted" style={{ fontSize: '0.8rem', marginBottom: '0.5rem' }}>
-            Images are optional — only attach a photo if it helps document the incident (max 5MB).
+            You can attach multiple photos (max 10, 5MB each) to document the incident.
           </p>
           <input
             type="file"
             accept="image/*"
+            multiple
             onChange={(e) => {
-              const file = e.target.files?.[0] || null;
-              if (file && file.size > 5 * 1024 * 1024) {
-                toast.error('Image must be 5MB or smaller');
-                e.target.value = '';
-                setImageFile(null);
-                setImagePreview('');
-                return;
+              const selected = Array.from(e.target.files || []);
+              const valid = [];
+              for (const file of selected) {
+                if (file.size > 5 * 1024 * 1024) {
+                  toast.error(`${file.name} is larger than 5MB and was skipped`);
+                  continue;
+                }
+                valid.push(file);
               }
-              setImageFile(file);
-              setImagePreview(file ? URL.createObjectURL(file) : '');
+              const limited = valid.slice(0, 10);
+              if (valid.length > 10) toast.error('Maximum 10 images — extra files were ignored');
+
+              imagePreviews.forEach((url) => {
+                try { URL.revokeObjectURL(url); } catch (_) {}
+              });
+              setImageFiles(limited);
+              setImagePreviews(limited.map((f) => URL.createObjectURL(f)));
             }}
           />
-          {imagePreview && (
+          {imagePreviews.length > 0 && (
             <div style={{ marginTop: '0.75rem' }}>
-              <img
-                src={imagePreview}
-                alt="Evidence preview"
-                style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 10, border: '1px solid var(--border)' }}
-              />
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                {imagePreviews.map((src, i) => (
+                  <div key={i} style={{ position: 'relative' }}>
+                    <img
+                      src={src}
+                      alt={`Evidence preview ${i + 1}`}
+                      style={{ width: 120, height: 120, objectFit: 'cover', borderRadius: 10, border: '1px solid var(--border)' }}
+                    />
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      style={{ position: 'absolute', top: 4, right: 4, padding: '2px 6px', fontSize: 11 }}
+                      onClick={() => {
+                        try { URL.revokeObjectURL(imagePreviews[i]); } catch (_) {}
+                        setImageFiles((prev) => prev.filter((_, idx) => idx !== i));
+                        setImagePreviews((prev) => prev.filter((_, idx) => idx !== i));
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
               <button
                 type="button"
                 className="btn-secondary"
                 style={{ marginTop: 8 }}
                 onClick={() => {
-                  setImageFile(null);
-                  setImagePreview('');
+                  imagePreviews.forEach((url) => {
+                    try { URL.revokeObjectURL(url); } catch (_) {}
+                  });
+                  setImageFiles([]);
+                  setImagePreviews([]);
                 }}
               >
-                Remove photo
+                Remove all photos
               </button>
             </div>
           )}
