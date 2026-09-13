@@ -1,9 +1,6 @@
 const path = require('path');
 const { Pool } = require('pg');
 
-cat > /home/workdir/artifacts/townhall-live/townhall/server/db.js << 'EOF'
-const { Pool } = require('pg');
-
 /**
  * Render provides DATABASE_URL.
  * Local/Docker can use discrete DB_* vars.
