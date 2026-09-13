@@ -116,6 +116,7 @@ export function useNotifications() {
             if (!knownIds.current.has(r.id)) {
               addNotification({
                 id: `report-${r.id}-${Date.now()}`,
+                reportId: r.id,
                 type: 'new_report',
                 title: r.title || 'New report',
                 message: `${r.category || 'Report'} · ${r.status || 'pending'}`,
