@@ -1,16 +1,4 @@
 // server/routes/responses.js
-/**
- * Report Responses – responders and admins post comments/updates on a report.
- * Citizens can read responses on their own reports.
- *
- * Routes:
- *   GET    /api/responses/:reportId   – fetch all responses for a report
- *   POST   /api/responses/:reportId   – post a new response (responder/admin only)
- *   DELETE /api/responses/:id         – delete a response (admin only)
- *
- * Requires:  report_responses table from migration 001
- */
-
 const express   = require('express');
 const router    = express.Router();
 const pool      = require('../db');
@@ -22,7 +10,6 @@ const syncQueue = require('../services/syncQueue');
 router.get('/:reportId', auth, async (req, res) => {
   const { reportId } = req.params;
   try {
-    // Citizens may only read responses for their own reports
     if (req.user.role === 'citizen') {
       const ownerCheck = await pool.query(
         'SELECT id FROM reports WHERE id=$1 AND user_id=$2',
@@ -47,10 +34,55 @@ router.get('/:reportId', auth, async (req, res) => {
       [reportId]
     );
 
-    res.json(result.rows);
+    // 72-hour tracking: check if report is overdue for a response
+    const reportResult = await pool.query(
+      'SELECT created_at, status FROM reports WHERE id=$1',
+      [reportId]
+    );
+    const report = reportResult.rows[0];
+    const hoursElapsed = report
+      ? (Date.now() - new Date(report.created_at).getTime()) / (1000 * 60 * 60)
+      : 0;
+    const isOverdue =
+      report &&
+      report.status !== 'resolved' &&
+      hoursElapsed > 72 &&
+      result.rows.length === 0;
+
+    res.json({
+      responses: result.rows,
+      meta: {
+        hoursElapsed: Math.round(hoursElapsed),
+        isOverdue,
+        deadline: report
+          ? new Date(new Date(report.created_at).getTime() + 72 * 60 * 60 * 1000).toISOString()
+          : null,
+      },
+    });
   } catch (err) {
     console.error('[responses GET]', err);
     res.status(500).json({ error: 'Failed to fetch responses' });
+  }
+});
+
+// ─── GET overdue reports (no response after 72h) ──────────────────────────────
+router.get('/overdue/all', auth, rbac('responder', 'administrator'), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT r.id, r.title, r.category, r.status, r.created_at,
+              EXTRACT(EPOCH FROM (NOW() - r.created_at))/3600 AS hours_elapsed
+       FROM reports r
+       WHERE r.status != 'resolved'
+         AND r.created_at < NOW() - INTERVAL '72 hours'
+         AND NOT EXISTS (
+           SELECT 1 FROM report_responses rr WHERE rr.report_id = r.id
+         )
+       ORDER BY r.created_at ASC`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('[responses overdue]', err);
+    res.status(500).json({ error: 'Failed to fetch overdue reports' });
   }
 });
 
@@ -73,8 +105,6 @@ router.post('/:reportId', auth, rbac('responder', 'administrator'), async (req, 
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('[responses POST]', err);
-
-    // Offline / transient failure → enqueue for retry
     const queueId = syncQueue.enqueue({
       type:    'POST_RESPONSE',
       payload: { reportId, userId: req.user.id, message: message.trim() },
