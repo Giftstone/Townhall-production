@@ -1,9 +1,43 @@
 // server/routes/polls.js
+const path = require('path');
+const fs = require('fs');
 const express = require('express');
+const multer = require('multer');
 const router = express.Router();
 const crypto = require('crypto');
 const pool = require('../db');
 const auth = require('../middleware/auth');
+
+const uploadDir = path.join(__dirname, '..', 'uploads');
+fs.mkdirSync(uploadDir, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, uploadDir),
+  filename: (_req, file, cb) => {
+    const safe = String(file.originalname || 'image').replace(/[^a-zA-Z0-9._-]/g, '_');
+    cb(null, `poll-${Date.now()}-${Math.round(Math.random() * 1e6)}-${safe}`);
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024, files: 5 },
+  fileFilter: (_req, file, cb) => {
+    if (!file.mimetype || !file.mimetype.startsWith('image/')) {
+      return cb(new Error('Only image uploads are allowed'));
+    }
+    cb(null, true);
+  },
+});
+
+async function ensurePollImageColumn() {
+  try {
+    await pool.query(`ALTER TABLE polls ADD COLUMN IF NOT EXISTS image_urls TEXT[] DEFAULT '{}'`);
+  } catch (err) {
+    console.warn('polls.image_urls ensure:', err.message);
+  }
+}
+ensurePollImageColumn();
 
 const generateHash = (userId, pollId) => {
   return crypto.createHash('sha256').update(String(userId) + String(pollId)).digest('hex');
@@ -27,6 +61,11 @@ async function getOptionCounts(pollIds) {
     map.get(row.poll_id)[row.option_index] = row.count;
   }
   return map;
+}
+
+function normalizePollImages(p) {
+  const urls = Array.isArray(p.image_urls) ? p.image_urls.filter(Boolean) : [];
+  return { ...p, image_urls: urls };
 }
 
 // 1. GET ALL OPEN POLLS (+ anonymous option tallies)
@@ -54,14 +93,14 @@ router.get('/', auth, async (req, res) => {
       const options = Array.isArray(p.options) ? p.options : [];
       const countMap = countsByPoll.get(p.id) || {};
       const option_counts = options.map((_, idx) => Number(countMap[idx] || 0));
-      return {
+      return normalizePollImages({
         ...p,
         options,
         option_counts,
         total_votes: Number(p.total_votes) || option_counts.reduce((a, b) => a + b, 0),
         has_voted: votedPollMap.has(p.id),
         voted_option: votedPollMap.get(p.id),
-      };
+      });
     });
 
     res.json(finalPolls);
@@ -71,46 +110,85 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
-// 2. CREATE A POLL
-router.post('/', auth, async (req, res) => {
-  const { category, description, options, report_id: reportId } = req.body;
-  if (!category || !description || !options || options.length < 2) {
-    return res.status(400).json({ error: 'Missing fields or need at least 2 options' });
-  }
+// 2. CREATE A POLL (JSON or multipart with optional images)
+router.post('/', auth, (req, res) => {
+  upload.array('images', 5)(req, res, async (err) => {
+    if (err) {
+      return res.status(400).json({ error: err.message || 'Upload failed' });
+    }
 
-  const allowed = ['healthcare', 'education', 'water', 'roads', 'security'];
-  const cat = allowed.includes(category) ? category : 'roads';
-  const cleanOptions = options.map((o) => String(o).trim()).filter(Boolean);
-  if (cleanOptions.length < 2) {
-    return res.status(400).json({ error: 'Need at least 2 non-empty options' });
-  }
+    // Support both JSON body and multipart form fields
+    let category = req.body.category;
+    let description = req.body.description;
+    let options = req.body.options;
+    let reportId = req.body.report_id || req.body.reportId || null;
 
-  try {
-    // Optional link to a report (column may not exist on older DBs)
-    let result;
-    try {
-      result = await pool.query(
-        `INSERT INTO polls (category, description, options, report_id)
-         VALUES ($1, $2, $3, $4) RETURNING *`,
-        [cat, description, cleanOptions, reportId || null]
-      );
-    } catch (e) {
-      if (e.code === '42703') {
-        // report_id column missing — insert without it
-        result = await pool.query(
-          `INSERT INTO polls (category, description, options)
-           VALUES ($1, $2, $3) RETURNING *`,
-          [cat, description, cleanOptions]
-        );
-      } else {
-        throw e;
+    // options may arrive as JSON string from FormData
+    if (typeof options === 'string') {
+      try {
+        options = JSON.parse(options);
+      } catch {
+        options = options.split('\n').map((s) => s.trim()).filter(Boolean);
       }
     }
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to create poll' });
-  }
+
+    if (!category || !description || !options || options.length < 2) {
+      for (const f of req.files || []) {
+        try { fs.unlinkSync(f.path); } catch (_) {}
+      }
+      return res.status(400).json({ error: 'Missing fields or need at least 2 options' });
+    }
+
+    const allowed = ['healthcare', 'education', 'water', 'roads', 'security'];
+    const cat = allowed.includes(category) ? category : 'roads';
+    const cleanOptions = options.map((o) => String(o).trim()).filter(Boolean);
+    if (cleanOptions.length < 2) {
+      for (const f of req.files || []) {
+        try { fs.unlinkSync(f.path); } catch (_) {}
+      }
+      return res.status(400).json({ error: 'Need at least 2 non-empty options' });
+    }
+
+    const imageUrls = (req.files || []).map((f) => `/uploads/${f.filename}`);
+
+    try {
+      let result;
+      try {
+        result = await pool.query(
+          `INSERT INTO polls (category, description, options, report_id, image_urls)
+           VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+          [cat, description, cleanOptions, reportId || null, imageUrls]
+        );
+      } catch (e) {
+        if (e.code === '42703') {
+          // Columns missing — progressive fallback
+          try {
+            result = await pool.query(
+              `INSERT INTO polls (category, description, options, report_id)
+               VALUES ($1, $2, $3, $4) RETURNING *`,
+              [cat, description, cleanOptions, reportId || null]
+            );
+          } catch (e2) {
+            if (e2.code === '42703') {
+              result = await pool.query(
+                `INSERT INTO polls (category, description, options)
+                 VALUES ($1, $2, $3) RETURNING *`,
+                [cat, description, cleanOptions]
+              );
+            } else {
+              throw e2;
+            }
+          }
+        } else {
+          throw e;
+        }
+      }
+      res.status(201).json(normalizePollImages(result.rows[0]));
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: 'Failed to create poll' });
+    }
+  });
 });
 
 // 3. CAST A VOTE (anonymous hash — no identity stored with the vote)

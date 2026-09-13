@@ -210,16 +210,37 @@ export default function ReportDetail() {
 
               <p style={{ marginTop: 12, color: 'var(--muted)' }}>{report.description}</p>
 
-              {report.image_url && (
-                <div style={{ marginTop: 16 }}>
-                  <h3 className="panel-title" style={{ fontSize: 16 }}>Evidence photo</h3>
-                  <img
-                    src={`${API_URL}${report.image_url}`}
-                    alt="Report evidence"
-                    style={{ maxWidth: '100%', maxHeight: 420, borderRadius: 12, border: '1px solid var(--border)', marginTop: 8 }}
-                  />
-                </div>
-              )}
+              {(() => {
+                const urls = Array.isArray(report.image_urls) && report.image_urls.length
+                  ? report.image_urls
+                  : report.image_url
+                    ? [report.image_url]
+                    : [];
+                if (!urls.length) return null;
+                return (
+                  <div style={{ marginTop: 16 }}>
+                    <h3 className="panel-title" style={{ fontSize: 16 }}>
+                      Evidence photo{urls.length > 1 ? 's' : ''}
+                    </h3>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 8 }}>
+                      {urls.map((src, i) => (
+                        <img
+                          key={i}
+                          src={`${API_URL}${src}`}
+                          alt={`Report evidence ${i + 1}`}
+                          style={{
+                            maxWidth: urls.length === 1 ? '100%' : 280,
+                            maxHeight: 320,
+                            borderRadius: 12,
+                            border: '1px solid var(--border)',
+                            objectFit: 'cover',
+                          }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
 
               <ul style={{ marginTop: 12, paddingLeft: 18, lineHeight: 1.7 }}>
                 <li><strong>Category:</strong> {report.category}</li>

@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS reports (
   latitude FLOAT,
   longitude FLOAT,
   image_url TEXT,
+  image_urls TEXT[] DEFAULT '{}',
   user_id UUID REFERENCES users(id) ON DELETE CASCADE,
   assigned_to UUID REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS polls (
   category TEXT CHECK (category IN ('healthcare','education','water','roads','security')),
   description TEXT,
   options TEXT[],
+  image_urls TEXT[] DEFAULT '{}',
   ward_id INT REFERENCES wards(id),
   created_at TIMESTAMPTZ DEFAULT NOW(),
   status TEXT DEFAULT 'open'

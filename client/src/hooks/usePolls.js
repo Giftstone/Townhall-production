@@ -30,14 +30,33 @@ export const usePolls = (token) => {
     return () => { isMounted = false; };
   }, [token]);
 
-  const createPoll = useCallback(async (data) => {
-    const res = await fetch(`${API_URL}/api/polls`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-      body: JSON.stringify(data)
-    });
+  // data: poll fields; imageFiles?: File[]
+  const createPoll = useCallback(async (data, imageFiles) => {
+    const files = Array.isArray(imageFiles) ? imageFiles.filter(Boolean) : [];
+    let res;
+
+    if (files.length > 0) {
+      const fd = new FormData();
+      Object.entries(data || {}).forEach(([k, v]) => {
+        if (v === undefined || v === null) return;
+        if (k === 'options') fd.append('options', JSON.stringify(v));
+        else fd.append(k, String(v));
+      });
+      files.forEach((f) => fd.append('images', f));
+      res = await fetch(`${API_URL}/api/polls`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      });
+    } else {
+      res = await fetch(`${API_URL}/api/polls`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify(data),
+      });
+    }
     if (!res.ok) throw new Error((await res.json()).error);
-    
+
     // Refresh polls list
     const fetchRes = await fetch(`${API_URL}/api/polls`, { headers: { Authorization: `Bearer ${token}` } });
     if (fetchRes.ok) setPolls(await fetchRes.json());
