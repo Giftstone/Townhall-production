@@ -22,7 +22,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     if (!file.mimetype || !file.mimetype.startsWith('image/')) {
       return cb(new Error('Only image uploads are allowed'));
@@ -34,7 +34,7 @@ const upload = multer({
 const reportSelect = `
   SELECT
     r.id, r.title, r.description, r.category, r.status,
-    r.location, r.latitude, r.longitude, r.image_url,
+    r.location, r.latitude, r.longitude, r.image_url, r.image_urls,
     r.created_at, r.updated_at,
     r.user_id, r.assigned_to,
     reporter.name AS reporter_name,
@@ -44,39 +44,21 @@ const reportSelect = `
   LEFT JOIN users assignee ON assignee.id = r.assigned_to
 `;
 
-// Ensure column exists (safe for older DBs)
-async function ensureImageColumn() {
+async function ensureImageColumns() {
   try {
     await pool.query('ALTER TABLE reports ADD COLUMN IF NOT EXISTS image_url TEXT');
+    await pool.query("ALTER TABLE reports ADD COLUMN IF NOT EXISTS image_urls TEXT[] DEFAULT '{}'");
   } catch (err) {
-    console.warn('image_url column ensure:', err.message);
+    console.warn('image column ensure:', err.message);
   }
 }
-ensureImageColumn();
+ensureImageColumns();
 
 router.get('/', async (_req, res) => {
   try {
     const result = await pool.query(`${reportSelect} ORDER BY r.created_at DESC`);
     res.json(result.rows);
   } catch (err) {
-    // Fallback if image_url missing mid-deploy
-    if (err.code === '42703') {
-      try {
-        const result = await pool.query(
-          `SELECT r.id, r.title, r.description, r.category, r.status,
-                  r.location, r.latitude, r.longitude,
-                  r.created_at, r.updated_at, r.user_id, r.assigned_to,
-                  reporter.name AS reporter_name, assignee.name AS assignee_name
-           FROM reports r
-           LEFT JOIN users reporter ON reporter.id = r.user_id
-           LEFT JOIN users assignee ON assignee.id = r.assigned_to
-           ORDER BY r.created_at DESC`
-        );
-        return res.json(result.rows);
-      } catch (e2) {
-        console.error(e2);
-      }
-    }
     console.error('List reports error:', err);
     res.status(500).json({ error: 'Failed to load reports' });
   }
@@ -93,66 +75,37 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-async function insertReport({ title, description, category, location, latitude, longitude, userId, imageUrl }) {
-  try {
-    const result = await pool.query(
-      `INSERT INTO reports
-         (title, description, category, status, location, latitude, longitude, user_id, image_url)
-       VALUES ($1,$2,$3,'pending',$4,$5,$6,$7,$8)
-       RETURNING *`,
-      [title, description, category, location || null, latitude || null, longitude || null, userId, imageUrl || null]
-    );
-    return result.rows[0];
-  } catch (err) {
-    if (err.code === '42703') {
-      const result = await pool.query(
-        `INSERT INTO reports
-           (title, description, category, status, location, latitude, longitude, user_id)
-         VALUES ($1,$2,$3,'pending',$4,$5,$6,$7)
-         RETURNING *`,
-        [title, description, category, location || null, latitude || null, longitude || null, userId]
-      );
-      return result.rows[0];
-    }
-    throw err;
-  }
-}
-
-// Optional image: multipart field name "image"
+// Multi-image POST (up to 10 images via field name "images")
 router.post('/', (req, res) => {
-  upload.single('image')(req, res, async (err) => {
-    if (err) {
-      return res.status(400).json({ error: err.message || 'Upload failed' });
-    }
+  upload.fields([{ name: 'images', maxCount: 10 }, { name: 'image', maxCount: 1 }])(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message || 'Upload failed' });
+
     try {
-      // Support JSON body (no file) and multipart fields
       const body = req.body || {};
-      const title = body.title;
-      const description = body.description;
-      const category = body.category;
-      const location = body.location;
-      const latitude = body.latitude !== undefined && body.latitude !== '' ? Number(body.latitude) : null;
+      const { title, description, category, location } = body;
+      const latitude  = body.latitude  !== undefined && body.latitude  !== '' ? Number(body.latitude)  : null;
       const longitude = body.longitude !== undefined && body.longitude !== '' ? Number(body.longitude) : null;
 
       if (!title || !description || !category) {
-        if (req.file) {
-          try { fs.unlinkSync(req.file.path); } catch (_) {}
-        }
+        const files = [...(req.files?.images || []), ...(req.files?.image || [])];
+        files.forEach(f => { try { fs.unlinkSync(f.path); } catch (_) {} });
         return res.status(400).json({ error: 'Title, description and category are required' });
       }
 
-      const imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
-      const row = await insertReport({
-        title,
-        description,
-        category,
-        location,
-        latitude,
-        longitude,
-        userId: req.user.id,
-        imageUrl,
-      });
-      res.status(201).json(row);
+      // Collect all uploaded image paths
+      const allFiles = [...(req.files?.images || []), ...(req.files?.image || [])];
+      const imageUrls = allFiles.map(f => `/uploads/${f.filename}`);
+      const imageUrl  = imageUrls[0] || null; // keep legacy single field
+
+      const result = await pool.query(
+        `INSERT INTO reports
+           (title, description, category, status, location, latitude, longitude, user_id, image_url, image_urls)
+         VALUES ($1,$2,$3,'pending',$4,$5,$6,$7,$8,$9)
+         RETURNING *`,
+        [title, description, category, location || null, latitude, longitude, req.user.id, imageUrl, imageUrls]
+      );
+
+      res.status(201).json(result.rows[0]);
     } catch (e) {
       console.error('Create report error:', e);
       res.status(500).json({ error: 'Failed to create report' });

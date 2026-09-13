@@ -6,20 +6,10 @@ const auth      = require('../middleware/auth');
 const rbac      = require('../middleware/rbac');
 const syncQueue = require('../services/syncQueue');
 
-// ─── GET responses for a report ──────────────────────────────────────────────
+// ─── GET responses for a report (visible to ALL authenticated users) ──────────
 router.get('/:reportId', auth, async (req, res) => {
   const { reportId } = req.params;
   try {
-    if (req.user.role === 'citizen') {
-      const ownerCheck = await pool.query(
-        'SELECT id FROM reports WHERE id=$1 AND user_id=$2',
-        [reportId, req.user.id]
-      );
-      if (ownerCheck.rows.length === 0) {
-        return res.status(403).json({ error: 'Access denied: not your report' });
-      }
-    }
-
     const result = await pool.query(
       `SELECT
          rr.id,
@@ -34,7 +24,6 @@ router.get('/:reportId', auth, async (req, res) => {
       [reportId]
     );
 
-    // 72-hour tracking: check if report is overdue for a response
     const reportResult = await pool.query(
       'SELECT created_at, status FROM reports WHERE id=$1',
       [reportId]
@@ -65,28 +54,7 @@ router.get('/:reportId', auth, async (req, res) => {
   }
 });
 
-// ─── GET overdue reports (no response after 72h) ──────────────────────────────
-router.get('/overdue/all', auth, rbac('responder', 'administrator'), async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT r.id, r.title, r.category, r.status, r.created_at,
-              EXTRACT(EPOCH FROM (NOW() - r.created_at))/3600 AS hours_elapsed
-       FROM reports r
-       WHERE r.status != 'resolved'
-         AND r.created_at < NOW() - INTERVAL '72 hours'
-         AND NOT EXISTS (
-           SELECT 1 FROM report_responses rr WHERE rr.report_id = r.id
-         )
-       ORDER BY r.created_at ASC`
-    );
-    res.json(result.rows);
-  } catch (err) {
-    console.error('[responses overdue]', err);
-    res.status(500).json({ error: 'Failed to fetch overdue reports' });
-  }
-});
-
-// ─── POST a response ──────────────────────────────────────────────────────────
+// ─── POST a response (responder/admin only) ───────────────────────────────────
 router.post('/:reportId', auth, rbac('responder', 'administrator'), async (req, res) => {
   const { reportId } = req.params;
   const { message }  = req.body;
