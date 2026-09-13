@@ -75,6 +75,7 @@ if (dashboardRoutes) app.use('/api/dashboard', dashboardRoutes);
 app.get('/api/health', (_req, res) =>
   res.json({ ok: true, env: process.env.NODE_ENV || 'development', time: new Date().toISOString() })
 );
+app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
 const publicDirCandidates = [
   path.join(__dirname, 'public'),
