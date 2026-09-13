@@ -7,7 +7,10 @@ export default defineConfig({
   server: {
     port: 5173,
   },
- build: {
-  chunkSizeWarningLimit: 1000,
- }
+  build: {
+    chunkSizeWarningLimit: 1000,
+    rollupOptions: {
+      external: [],
+    }
+  }
 });
