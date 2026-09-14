@@ -21,11 +21,31 @@ function persistUser(user) {
   else localStorage.removeItem(USER_KEY);
 }
 
+/** Best-effort decode of JWT payload (no signature check — server still authenticates). */
+function userFromAccessToken(accessToken) {
+  try {
+    const part = String(accessToken).split('.')[1];
+    if (!part) return null;
+    const json = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/')));
+    if (!json || (!json.id && !json.sub)) return null;
+    return {
+      id: json.id || json.sub,
+      email: json.email || '',
+      name: json.name || json.email || 'User',
+      role: json.role || 'citizen',
+    };
+  } catch {
+    return null;
+  }
+}
+
 export const useProvideAuth = () => {
   const [user, setUser] = useState(() => readStoredUser());
   const [token, setToken] = useState(() => localStorage.getItem(ACCESS_KEY));
   const [loading, setLoading] = useState(true);
   const verifyingRef = useRef(false);
+  // Prevent effect re-entry loops when setToken is called from inside verify/refresh
+  const bootstrappedRef = useRef(false);
 
   const logout = useCallback(() => {
     localStorage.removeItem(ACCESS_KEY);
@@ -45,10 +65,15 @@ export const useProvideAuth = () => {
     if (accessToken) setToken(accessToken);
   }, []);
 
-  // Try refresh once; returns new access token or null
+  /**
+   * @returns {{ status: 'ok'|'rejected'|'network', accessToken?: string }}
+   * - ok: got new tokens
+   * - rejected: server said refresh is invalid (true logout case)
+   * - network: fetch failed / CORS / offline — MUST NOT logout
+   */
   const tryRefresh = useCallback(async () => {
     const refreshToken = localStorage.getItem(REFRESH_KEY);
-    if (!refreshToken) return null;
+    if (!refreshToken) return { status: 'rejected' };
 
     try {
       const res = await fetch(`${API_URL}/api/auth/refresh`, {
@@ -56,21 +81,28 @@ export const useProvideAuth = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ refreshToken }),
       });
-      if (!res.ok) return null;
+
+      if (res.status === 401 || res.status === 403) {
+        return { status: 'rejected' };
+      }
+      if (!res.ok) {
+        // 5xx etc. — treat as soft failure, keep session
+        return { status: 'network' };
+      }
+
       const data = await res.json();
-      if (!data.accessToken) return null;
+      if (!data.accessToken) return { status: 'rejected' };
 
       localStorage.setItem(ACCESS_KEY, data.accessToken);
       if (data.refreshToken) localStorage.setItem(REFRESH_KEY, data.refreshToken);
-      setToken(data.accessToken);
-      return data.accessToken;
+      // Don't setToken here — caller controls that to avoid effect storms
+      return { status: 'ok', accessToken: data.accessToken };
     } catch {
-      // Network blip — do NOT wipe session
-      return null;
+      return { status: 'network' };
     }
   }, []);
 
-  // INITIAL LOAD + whenever access token changes
+  // Bootstrap session once on mount; only re-run when token is cleared/set from login/logout
   useEffect(() => {
     let cancelled = false;
 
@@ -79,13 +111,22 @@ export const useProvideAuth = () => {
       verifyingRef.current = true;
 
       const currentToken = localStorage.getItem(ACCESS_KEY);
+
       if (!currentToken) {
         if (!cancelled) {
           setUser(null);
           setLoading(false);
         }
         verifyingRef.current = false;
+        bootstrappedRef.current = true;
         return;
+      }
+
+      // Optimistic: show cached or JWT-decoded user immediately so viewport
+      // switches never flash the login screen while /me is in flight.
+      const optimistic = readStoredUser() || userFromAccessToken(currentToken);
+      if (optimistic && !cancelled) {
+        setUser((prev) => prev || optimistic);
       }
 
       try {
@@ -95,16 +136,29 @@ export const useProvideAuth = () => {
 
         // Access expired/invalid → try refresh once
         if (res.status === 401 || res.status === 403) {
-          const newAccess = await tryRefresh();
-          if (newAccess) {
+          const refreshed = await tryRefresh();
+
+          if (refreshed.status === 'ok' && refreshed.accessToken) {
+            if (!cancelled) setToken(refreshed.accessToken);
             res = await fetch(`${API_URL}/api/auth/me`, {
-              headers: { Authorization: `Bearer ${newAccess}` },
+              headers: { Authorization: `Bearer ${refreshed.accessToken}` },
             });
-          } else {
-            // Refresh also rejected → real logout
+          } else if (refreshed.status === 'rejected') {
+            // Server explicitly rejected refresh — real logout
             if (!cancelled) logout();
             if (!cancelled) setLoading(false);
             verifyingRef.current = false;
+            bootstrappedRef.current = true;
+            return;
+          } else {
+            // network — keep optimistic session
+            if (!cancelled) {
+              const keep = readStoredUser() || userFromAccessToken(currentToken);
+              if (keep) setUser(keep);
+              setLoading(false);
+            }
+            verifyingRef.current = false;
+            bootstrappedRef.current = true;
             return;
           }
         }
@@ -116,20 +170,21 @@ export const useProvideAuth = () => {
             setUser(userData);
           }
         } else if (res.status === 401 || res.status === 403) {
+          // /me still unauthorized after refresh attempt
           if (!cancelled) logout();
         } else {
-          // 5xx / unexpected — keep cached session; don't log out
-          const cached = readStoredUser();
-          if (cached && !cancelled) setUser(cached);
+          // Non-auth failure — keep session
+          const keep = readStoredUser() || userFromAccessToken(currentToken);
+          if (keep && !cancelled) setUser(keep);
         }
       } catch {
-        // Network error (common when toggling device toolbar / offline blip)
-        // Keep existing token + cached user. Do NOT logout.
-        const cached = readStoredUser();
-        if (cached && !cancelled) setUser(cached);
+        // Network / CORS / offline — NEVER logout
+        const keep = readStoredUser() || userFromAccessToken(currentToken);
+        if (keep && !cancelled) setUser(keep);
       } finally {
         if (!cancelled) setLoading(false);
         verifyingRef.current = false;
+        bootstrappedRef.current = true;
       }
     };
 
@@ -137,26 +192,27 @@ export const useProvideAuth = () => {
     return () => {
       cancelled = true;
     };
-  }, [token, logout, tryRefresh]);
+    // Intentionally only depend on token identity changes from login/logout/refresh success.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
 
-  // SILENT REFRESH on an interval — never logout on network failure
+  // Silent refresh interval
   useEffect(() => {
-    if (!token) return;
+    if (!token) return undefined;
 
     const refreshTimer = setInterval(async () => {
-      const newAccess = await tryRefresh();
-      if (!newAccess) {
-        // Only logout if refresh token is explicitly rejected (handled inside tryRefresh
-        // returning null after a 401/403). If it was a network error, leave session alone.
-        const stillHasRefresh = !!localStorage.getItem(REFRESH_KEY);
-        if (!stillHasRefresh) logout();
+      const result = await tryRefresh();
+      if (result.status === 'ok' && result.accessToken) {
+        setToken(result.accessToken);
+      } else if (result.status === 'rejected') {
+        logout();
       }
+      // network → ignore
     }, 12 * 60 * 1000);
 
     return () => clearInterval(refreshTimer);
   }, [token, tryRefresh, logout]);
 
-  // LOGIN
   const login = async (email, password) => {
     const res = await fetch(`${API_URL}/api/auth/login`, {
       method: 'POST',
@@ -173,7 +229,6 @@ export const useProvideAuth = () => {
     return data;
   };
 
-  // REGISTER
   const register = async (name, email, password, role) => {
     const res = await fetch(`${API_URL}/api/auth/register`, {
       method: 'POST',
