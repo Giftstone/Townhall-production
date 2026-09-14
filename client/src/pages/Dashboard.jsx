@@ -64,18 +64,20 @@ export default function Dashboard() {
     setDisplayedReports(Array.isArray(reports) ? reports : []);
   }, [reports]);
 
-  if (authLoading) {
+  // Hooks must run every render — never put useEffect after a conditional return
+  useEffect(() => {
+    if (!authLoading && !user && !token) {
+      navigate('/login', { replace: true });
+    }
+  }, [authLoading, user, token, navigate]);
+
+  if (authLoading || (!user && token)) {
     return (
       <div className="loading-screen">
         <IconSpinner size={22} /> Loading…
       </div>
     );
   }
-  useEffect(() => {
-    if (!authLoading && !user) {
-      navigate('/login', { replace: true });
-    }
-  }, [authLoading, user, navigate]);
 
   if (!user) {
     return (
