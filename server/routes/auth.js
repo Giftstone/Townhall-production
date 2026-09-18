@@ -55,7 +55,7 @@ router.post('/login', async (req, res) => {
     }
 
     const accessToken = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
+      { id: user.id, email: user.email, role: user.role, ward_id: user.ward_id || null },
       JWT_SECRET,
       { expiresIn: '1h' }
     );
@@ -66,10 +66,24 @@ router.post('/login', async (req, res) => {
       user.id,
     ]);
 
+    // Resolve ward name if present
+    let wardName = null;
+    if (user.ward_id) {
+      const w = await pool.query('SELECT name FROM wards WHERE id = $1', [user.ward_id]);
+      wardName = w.rows[0]?.name || null;
+    }
+
     res.json({
       accessToken,
       refreshToken,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role },
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        ward_id: user.ward_id || null,
+        ward_name: wardName,
+      },
     });
   } catch (err) {
     console.error('Login error:', err);
@@ -94,7 +108,7 @@ router.post('/refresh', async (req, res) => {
 
     const user = result.rows[0];
     const newAccessToken = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
+      { id: user.id, email: user.email, role: user.role, ward_id: user.ward_id || null },
       JWT_SECRET,
       { expiresIn: '1h' }
     );
@@ -119,7 +133,10 @@ router.get('/me', async (req, res) => {
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     const result = await pool.query(
-      'SELECT id, name, email, role FROM users WHERE id = $1',
+      `SELECT u.id, u.name, u.email, u.role, u.ward_id, w.name AS ward_name
+       FROM users u
+       LEFT JOIN wards w ON w.id = u.ward_id
+       WHERE u.id = $1`,
       [decoded.id]
     );
     if (result.rows.length === 0) {

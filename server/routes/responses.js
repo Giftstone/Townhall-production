@@ -54,7 +54,10 @@ router.get('/:reportId', auth, async (req, res) => {
   }
 });
 
-// ─── POST a response (responder/admin only) ───────────────────────────────────
+// ─── POST a response ─────────────────────────────────────────────────────────
+// Only the assigned responder (or an administrator) may post an official response.
+// Example: a water & sewerage company worker assigned to a pipe-burst report
+// is the only responder allowed to post the official response on that report.
 router.post('/:reportId', auth, rbac('responder', 'administrator'), async (req, res) => {
   const { reportId } = req.params;
   const { message }  = req.body;
@@ -64,6 +67,29 @@ router.post('/:reportId', auth, rbac('responder', 'administrator'), async (req, 
   }
 
   try {
+    const reportRes = await pool.query(
+      'SELECT id, assigned_to, status, title FROM reports WHERE id = $1',
+      [reportId]
+    );
+    if (reportRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+    const report = reportRes.rows[0];
+
+    // Administrators may always post; responders only if they are the assignee
+    if (req.user.role === 'responder') {
+      if (!report.assigned_to) {
+        return res.status(403).json({
+          error: 'This report has not been assigned yet. Only the assigned responder can post an official response.',
+        });
+      }
+      if (String(report.assigned_to) !== String(req.user.id)) {
+        return res.status(403).json({
+          error: 'Only the responder assigned to this report may post an official response.',
+        });
+      }
+    }
+
     const result = await pool.query(
       `INSERT INTO report_responses (report_id, user_id, message)
        VALUES ($1, $2, $3)

@@ -53,15 +53,16 @@ router.get('/stats', async (req, res) => {
 router.get('/users', async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT id, name, email, role, ward_id, created_at
-      FROM users
+      SELECT u.id, u.name, u.email, u.role, u.ward_id, w.name AS ward_name, u.created_at
+      FROM users u
+      LEFT JOIN wards w ON w.id = u.ward_id
       ORDER BY
-        CASE role
+        CASE u.role
           WHEN 'administrator' THEN 1
           WHEN 'responder' THEN 2
           ELSE 3
         END,
-        name
+        u.name
     `);
     res.json(result.rows);
   } catch (err) {
@@ -71,20 +72,35 @@ router.get('/users', async (req, res) => {
 });
 
 // ─── PATCH /api/admin/users/:id/role ─────────────────────────────────────────
+// Also accepts optional ward_id (required in practice when promoting to responder)
 router.patch('/users/:id/role', async (req, res) => {
   const { id } = req.params;
-  const { role } = req.body;
+  const { role, ward_id } = req.body;
   const allowed = ['citizen', 'responder', 'administrator'];
 
   if (!allowed.includes(role)) {
     return res.status(400).json({ error: 'Invalid role' });
   }
 
+  // Responders should belong to a named ward
+  if (role === 'responder' && (ward_id === undefined || ward_id === null || ward_id === '')) {
+    return res.status(400).json({
+      error: 'Responders must be assigned to a named ward. Provide ward_id.',
+    });
+  }
+
   try {
     const result = await pool.query(
-      `UPDATE users SET role = $1 WHERE id = $2
+      `UPDATE users
+       SET role = $1,
+           ward_id = CASE
+             WHEN $1 = 'responder' THEN $3::int
+             WHEN $3::int IS NOT NULL THEN $3::int
+             ELSE ward_id
+           END
+       WHERE id = $2
        RETURNING id, name, email, role, ward_id, created_at`,
-      [role, id]
+      [role, id, ward_id ?? null]
     );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'User not found' });
@@ -92,7 +108,6 @@ router.patch('/users/:id/role', async (req, res) => {
 
     const user = result.rows[0];
 
-    // Real-time notify the user whose role changed
     notify({
       userId: user.id,
       event: 'notification',
@@ -101,6 +116,7 @@ router.patch('/users/:id/role', async (req, res) => {
         title: 'Your role was updated',
         message: `An administrator changed your role to "${role}".`,
         role,
+        ward_id: user.ward_id,
       },
     });
 
@@ -111,15 +127,62 @@ router.patch('/users/:id/role', async (req, res) => {
   }
 });
 
+// ─── PATCH /api/admin/users/:id/ward ─────────────────────────────────────────
+// Explicitly assign / change a responder's ward
+router.patch('/users/:id/ward', async (req, res) => {
+  const { id } = req.params;
+  const { ward_id } = req.body;
+
+  if (ward_id === undefined || ward_id === null) {
+    return res.status(400).json({ error: 'ward_id is required' });
+  }
+
+  try {
+    const wardCheck = await pool.query('SELECT id, name FROM wards WHERE id = $1', [ward_id]);
+    if (wardCheck.rows.length === 0) {
+      return res.status(400).json({ error: 'Invalid ward_id' });
+    }
+
+    const result = await pool.query(
+      `UPDATE users SET ward_id = $1 WHERE id = $2
+       RETURNING id, name, email, role, ward_id, created_at`,
+      [ward_id, id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({ ...result.rows[0], ward_name: wardCheck.rows[0].name });
+  } catch (err) {
+    console.error('[admin/users/ward]', err);
+    res.status(500).json({ error: 'Failed to update ward' });
+  }
+});
+
 // ─── GET /api/admin/responders ───────────────────────────────────────────────
 router.get('/responders', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, name, email FROM users WHERE role = 'responder' ORDER BY name`
+      `SELECT u.id, u.name, u.email, u.ward_id, w.name AS ward_name
+       FROM users u
+       LEFT JOIN wards w ON w.id = u.ward_id
+       WHERE u.role = 'responder'
+       ORDER BY w.name NULLS LAST, u.name`
     );
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch responders' });
+  }
+});
+
+// ─── GET /api/admin/wards ────────────────────────────────────────────────────
+router.get('/wards', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, name, deficit_index FROM wards ORDER BY name`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch wards' });
   }
 });
 

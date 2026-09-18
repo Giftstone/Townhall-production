@@ -29,6 +29,39 @@ export default function ReportDetail() {
 
   const token = localStorage.getItem('accessToken');
   const canManage = user?.role === 'administrator' || user?.role === 'responder';
+  // Only the assigned responder (or admin) may post an official response
+  const canPostOfficialResponse = !!(
+    user &&
+    report &&
+    (user.role === 'administrator' ||
+      (user.role === 'responder' &&
+        report.assigned_to &&
+        String(report.assigned_to) === String(user.id)))
+  );
+
+  const downloadPdf = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/reports/${id}/pdf`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to download PDF');
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Townhall-Report-${String(id).slice(0, 8)}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      toast.success('PDF downloaded');
+    } catch (err) {
+      toast.error(err.message || 'PDF download failed');
+    }
+  };
 
   useEffect(() => {
     setLoading(true);
@@ -171,11 +204,21 @@ export default function ReportDetail() {
 
           {report && (
             <>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
                 <h2 className="panel-title" style={{ margin: 0 }}>
                   <IconReport size={20} /> {report.title}
                 </h2>
-                <span className={`status-pill ${report.status}`}>{report.status}</span>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <button
+                    type="button"
+                    className="btn-secondary btn-with-icon"
+                    onClick={downloadPdf}
+                    title="Download report and official responses as PDF"
+                  >
+                    Download PDF
+                  </button>
+                  <span className={`status-pill ${report.status}`}>{report.status}</span>
+                </div>
               </div>
 
               {/* 72-hour overdue banner */}
@@ -335,8 +378,8 @@ export default function ReportDetail() {
               </div>
             )}
 
-            {/* Post response — responders and admins only */}
-            {canManage && (
+            {/* Post response — only the assigned responder (or admin) */}
+            {canPostOfficialResponse ? (
               <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <textarea
                   value={message}
@@ -363,9 +406,17 @@ export default function ReportDetail() {
                   onClick={postResponse}
                   disabled={posting || !message.trim()}
                 >
-                  {posting ? 'Posting...' : 'Post response'}
+                  {posting ? 'Posting...' : 'Post official response'}
                 </button>
               </div>
+            ) : (
+              user?.role === 'responder' && (
+                <p style={{ marginTop: 16, fontSize: 13, color: 'var(--muted)' }}>
+                  {report?.assigned_to
+                    ? 'Only the responder assigned to this report can post an official response.'
+                    : 'This report is not yet assigned. An administrator must assign it before an official response can be posted.'}
+                </p>
+              )
             )}
           </div>
         )}

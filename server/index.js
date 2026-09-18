@@ -1,6 +1,5 @@
 require('dotenv').config();
 
-const { authLimiter, apiLimiter } = require('./middleware/rateLimiter');
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
@@ -45,8 +44,6 @@ if (process.env.CORS_ORIGIN && process.env.CORS_ORIGIN.includes(',')) {
   });
 }
 
-app.use('/api/', apiLimiter);
-app.use('/api/auth', authLimiter);
 app.use(
   cors({
     origin: (origin, callback) => {

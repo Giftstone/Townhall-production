@@ -29,6 +29,14 @@ import {
   IconSpinner,
 } from '../components/Icons';
 import { API_URL } from '../config';
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+} from 'recharts';
 
 // Fix for default marker icon issues with React-Leaflet
 delete L.Icon.Default.prototype._getIconUrl;
@@ -405,8 +413,10 @@ function AdminPanel({ reports, loading, updateStatus, setReports }) {
   const [tab, setTab] = useState('overview');
   const [users, setUsers] = useState([]);
   const [responders, setResponders] = useState([]);
+  const [wards, setWards] = useState([]);
   const [usersLoading, setUsersLoading] = useState(false);
   const [assigning, setAssigning] = useState({});
+  const [pendingRole, setPendingRole] = useState({}); // userId -> role awaiting ward
 
   const openMatching = (predicate) => {
     const matches = reports.filter(predicate);
@@ -424,12 +434,14 @@ function AdminPanel({ reports, loading, updateStatus, setReports }) {
   const loadUsers = async () => {
     setUsersLoading(true);
     try {
-      const [uRes, rRes] = await Promise.all([
+      const [uRes, rRes, wRes] = await Promise.all([
         fetch(`${API_URL}/api/admin/users`, { headers: authHeaders() }),
         fetch(`${API_URL}/api/admin/responders`, { headers: authHeaders() }),
+        fetch(`${API_URL}/api/admin/wards`, { headers: authHeaders() }),
       ]);
       if (uRes.ok) setUsers(await uRes.json());
       if (rRes.ok) setResponders(await rRes.json());
+      if (wRes.ok) setWards(await wRes.json());
     } catch {
       toast.error('Failed to load users');
     } finally {
@@ -442,17 +454,56 @@ function AdminPanel({ reports, loading, updateStatus, setReports }) {
     if (t === 'users' || t === 'reports') loadUsers();
   };
 
-  const changeRole = async (userId, role) => {
+  const changeRole = async (userId, role, wardId = null) => {
     try {
+      const body = { role };
+      if (role === 'responder') {
+        if (!wardId) {
+          setPendingRole((p) => ({ ...p, [userId]: role }));
+          toast('Select a ward for this responder');
+          return;
+        }
+        body.ward_id = Number(wardId);
+      }
       const res = await fetch(`${API_URL}/api/admin/users/${userId}/role`, {
         method: 'PATCH',
         headers: authHeaders(),
-        body: JSON.stringify({ role }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) throw new Error((await res.json()).error || 'Failed');
       const updated = await res.json();
-      setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)));
+      setUsers((prev) => prev.map((u) => (u.id === updated.id ? { ...u, ...updated } : u)));
+      setPendingRole((p) => {
+        const n = { ...p };
+        delete n[userId];
+        return n;
+      });
+      const rRes = await fetch(`${API_URL}/api/admin/responders`, { headers: authHeaders() });
+      if (rRes.ok) setResponders(await rRes.json());
       toast.success(`Role updated to ${role}`);
+    } catch (err) {
+      toast.error(err.message);
+    }
+  };
+
+  const changeWard = async (userId, wardId) => {
+    if (!wardId) return;
+    // If role change to responder is pending, complete it with this ward
+    if (pendingRole[userId] === 'responder') {
+      return changeRole(userId, 'responder', wardId);
+    }
+    try {
+      const res = await fetch(`${API_URL}/api/admin/users/${userId}/ward`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ ward_id: Number(wardId) }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error || 'Failed');
+      const updated = await res.json();
+      setUsers((prev) => prev.map((u) => (u.id === updated.id ? { ...u, ...updated } : u)));
+      const rRes = await fetch(`${API_URL}/api/admin/responders`, { headers: authHeaders() });
+      if (rRes.ok) setResponders(await rRes.json());
+      toast.success(`Ward updated${updated.ward_name ? ` to ${updated.ward_name}` : ''}`);
     } catch (err) {
       toast.error(err.message);
     }
@@ -605,6 +656,7 @@ function AdminPanel({ reports, loading, updateStatus, setReports }) {
                   <th>Name</th>
                   <th>Email</th>
                   <th>Role</th>
+                  <th>Ward</th>
                   <th>Joined</th>
                 </tr>
               </thead>
@@ -616,12 +668,26 @@ function AdminPanel({ reports, loading, updateStatus, setReports }) {
                     <td>
                       <select
                         className="role-select"
-                        value={u.role}
-                        onChange={(e) => changeRole(u.id, e.target.value)}
+                        value={pendingRole[u.id] || u.role}
+                        onChange={(e) => changeRole(u.id, e.target.value, u.ward_id)}
                       >
                         <option value="citizen">citizen</option>
                         <option value="responder">responder</option>
                         <option value="administrator">administrator</option>
+                      </select>
+                    </td>
+                    <td>
+                      <select
+                        className="role-select"
+                        value={u.ward_id || ''}
+                        onChange={(e) => changeWard(u.id, e.target.value)}
+                        disabled={!(pendingRole[u.id] === 'responder' || u.role === 'responder' || u.role === 'administrator')}
+                        title={pendingRole[u.id] === 'responder' ? 'Select ward to finish promoting to responder' : 'Assign ward'}
+                      >
+                        <option value="">— No ward —</option>
+                        {wards.map((w) => (
+                          <option key={w.id} value={w.id}>{w.name}</option>
+                        ))}
                       </select>
                     </td>
                     <td style={{ color: 'var(--muted)', fontSize: '12px' }}>
@@ -658,51 +724,163 @@ function StatCard({ label, value, color }) {
 // ---  RESPONDER PANEL (Accepts Pending Reports) ---
 function ResponderPanel({ reports, loading, updateStatus }) {
   const navigate = useNavigate();
-  const pending = reports.filter((r) => r.status === 'pending');
+  const { user } = useAuth();
+  const pending = reports.filter((r) => r.status === 'pending' || r.status === 'assigned');
+  const [wardAnalytics, setWardAnalytics] = useState(null);
+  const [analyticsError, setAnalyticsError] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState(null);
+
+  useEffect(() => {
+    const token = localStorage.getItem('accessToken');
+    fetch(`${API_URL}/api/dashboard/ward-analytics`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(async (r) => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'Failed to load analytics');
+        setWardAnalytics(data);
+      })
+      .catch((err) => setAnalyticsError(err.message));
+  }, []);
+
+  const chartData = (wardAnalytics?.byCategory || []).map((c) => ({
+    name: c.category,
+    count: c.count,
+    reports: c.reports,
+  }));
+
   return (
-    <div className="panel">
-      <h2 className="panel-title">
-        <IconShield size={20} /> Responder Queue
-      </h2>
-      <h3 className="panel-title" style={{ marginBottom: '0.5rem' }}>
-        <IconMapPin size={18} /> Incident Map
-      </h3>
-      <IncidentMap reports={reports} />
-      {loading ? (
-        <p>Loading...</p>
-      ) : pending.length === 0 ? (
-        <p>All caught up! No pending reports.</p>
-      ) : (
-        <ul style={{ marginTop: '1rem' }}>
-          {pending.map((r) => (
-            <li key={r.id}>
-              <button type="button" className="report-hit" onClick={() => navigate(`/reports/${r.id}`)}>
-                <div>
-                  <strong>{r.title}</strong> ({r.category})
-                </div>
-                <p>{r.description}</p>
-              </button>
-              <button
-                type="button"
-                onClick={async (e) => {
-                  e.stopPropagation();
-                  try {
-                    await updateStatus(r.id, 'assigned');
-                    toast.success('Accepted report!');
-                  } catch (err) {
-                    toast.error(err.message);
-                  }
-                }}
-                className="btn-primary btn-with-icon"
-                style={{ width: 'auto', marginTop: 8 }}
-              >
-                <IconCheck size={14} /> Accept & Assign
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
+    <>
+      <div className="panel">
+        <h2 className="panel-title">
+          <IconShield size={20} /> Responder Queue
+          {user?.ward_name && (
+            <span style={{ marginLeft: 10, fontSize: 13, color: 'var(--muted)', fontWeight: 400 }}>
+              · {user.ward_name}
+            </span>
+          )}
+        </h2>
+        <h3 className="panel-title" style={{ marginBottom: '0.5rem' }}>
+          <IconMapPin size={18} /> Incident Map
+        </h3>
+        <IncidentMap reports={reports} />
+        {loading ? (
+          <p>Loading...</p>
+        ) : pending.length === 0 ? (
+          <p>All caught up! No pending / assigned reports.</p>
+        ) : (
+          <ul style={{ marginTop: '1rem' }}>
+            {pending.map((r) => (
+              <li key={r.id}>
+                <button type="button" className="report-hit" onClick={() => navigate(`/reports/${r.id}`)}>
+                  <div>
+                    <strong>{r.title}</strong> ({r.category})
+                  </div>
+                  <p>{r.description}</p>
+                </button>
+                {r.status === 'pending' && (
+                  <button
+                    type="button"
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      try {
+                        await updateStatus(r.id, 'assigned');
+                        toast.success('Accepted report!');
+                      } catch (err) {
+                        toast.error(err.message);
+                      }
+                    }}
+                    className="btn-primary btn-with-icon"
+                    style={{ width: 'auto', marginTop: 8 }}
+                  >
+                    <IconCheck size={14} /> Accept & Assign
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <div className="panel">
+        <h2 className="panel-title">
+          Ward Analytics
+          {wardAnalytics?.ward_name && (
+            <span style={{ marginLeft: 8, fontSize: 13, color: 'var(--muted)', fontWeight: 400 }}>
+              · {wardAnalytics.ward_name} ({wardAnalytics.totalReports} reports)
+            </span>
+          )}
+        </h2>
+        {analyticsError && <p className="field-error">{analyticsError}</p>}
+        {!analyticsError && !wardAnalytics && <p>Loading analytics…</p>}
+        {wardAnalytics && chartData.length === 0 && (
+          <p style={{ color: 'var(--muted)' }}>No reports in your ward yet.</p>
+        )}
+        {chartData.length > 0 && (
+          <>
+            <p style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 8 }}>
+              Click a bar to see the list of reports in that category.
+            </p>
+            <div style={{ width: '100%', height: 280 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart
+                  data={chartData}
+                  margin={{ top: 8, right: 16, left: 0, bottom: 8 }}
+                  onClick={(state) => {
+                    if (state && state.activePayload && state.activePayload[0]) {
+                      setSelectedCategory(state.activePayload[0].payload);
+                    }
+                  }}
+                >
+                  <XAxis dataKey="name" tick={{ fontSize: 12 }} />
+                  <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
+                  <Tooltip />
+                  <Bar dataKey="count" fill="#3B5D3A" cursor="pointer" radius={[6, 6, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+
+            {selectedCategory && (
+              <div style={{ marginTop: 16 }}>
+                <h3 className="panel-title" style={{ fontSize: 16 }}>
+                  {selectedCategory.name} reports ({selectedCategory.count})
+                  <button
+                    type="button"
+                    onClick={() => setSelectedCategory(null)}
+                    style={{
+                      marginLeft: 12,
+                      fontSize: 12,
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--muted)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Clear
+                  </button>
+                </h3>
+                <ul style={{ marginTop: 8 }}>
+                  {(selectedCategory.reports || []).map((r) => (
+                    <li key={r.id} style={{ marginBottom: 6 }}>
+                      <button
+                        type="button"
+                        className="report-hit"
+                        onClick={() => navigate(`/reports/${r.id}`)}
+                      >
+                        <strong>{r.title}</strong>
+                        <span style={{ marginLeft: 8, fontSize: 12, color: 'var(--muted)' }}>
+                          {r.status} · {r.created_at ? new Date(r.created_at).toLocaleDateString() : ''}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </>
   );
 }
 
