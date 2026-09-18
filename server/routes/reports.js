@@ -177,13 +177,13 @@ router.patch(
 );
 
 // ─── GET /api/reports/:id/pdf ────────────────────────────────────────────────
-// Official government-style PDF with map/location card, evidence images, responses
+// Official government-style PDF with real OSM map snapshot, evidence, responses
 router.get('/:id/pdf', async (req, res) => {
   const https = require('https');
   const http = require('http');
   const PDFDocument = require('pdfkit');
 
-  const fetchBuffer = (url, timeoutMs = 10000, redirects = 0) =>
+  const fetchBuffer = (url, timeoutMs = 12000, redirects = 0) =>
     new Promise((resolve, reject) => {
       try {
         const lib = url.startsWith('https') ? https : http;
@@ -192,7 +192,8 @@ router.get('/:id/pdf', async (req, res) => {
           {
             timeout: timeoutMs,
             headers: {
-              'User-Agent': 'TownhallPDF/1.0 (civic-report)',
+              // OSM tile usage policy requires a descriptive User-Agent
+              'User-Agent': 'TownhallCivicPlatform/1.0 (incident-report-pdf; contact: admin@townhall.local)',
               Accept: 'image/png,image/jpeg,image/*;q=0.8,*/*;q=0.5',
             },
           },
@@ -228,24 +229,62 @@ router.get('/:id/pdf', async (req, res) => {
       }
     });
 
-  const fetchMapSnapshot = async (lat, lng) => {
-    const candidates = [
-      `https://staticmap.openstreetmap.de/staticmap.php?center=${lat},${lng}&zoom=14&size=640x320&maptype=mapnik&markers=${lat},${lng},red-pushpin`,
-      `https://staticmap.openstreetmap.de/staticmap.php?center=${lat},${lng}&zoom=15&size=600x280&markers=${lat},${lng},red-pushpin`,
+  /** Convert WGS84 to OSM tile x/y at a zoom level */
+  const latLngToTile = (lat, lng, zoom) => {
+    const n = 2 ** zoom;
+    const x = ((lng + 180) / 360) * n;
+    const latRad = (lat * Math.PI) / 180;
+    const y =
+      ((1 -
+        Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) /
+        2) *
+      n;
+    return { x, y, n };
+  };
+
+  /**
+   * Build a real map snapshot by fetching a 2×2 grid of OSM tiles and
+   * returning the tile buffers + marker pixel offset for PDF composition.
+   */
+  const buildOsmMapTiles = async (lat, lng, zoom = 14) => {
+    const { x, y } = latLngToTile(lat, lng, zoom);
+    const x0 = Math.floor(x) - 0; // top-left tile
+    const y0 = Math.floor(y) - 0;
+    // Use 2x2 tiles centered roughly on the point
+    const tx0 = Math.floor(x) - (x - Math.floor(x) < 0.5 ? 1 : 0);
+    const ty0 = Math.floor(y) - (y - Math.floor(y) < 0.5 ? 1 : 0);
+
+    const tiles = []; // [{dx, dy, buffer}]
+    const coords = [
+      [tx0, ty0],
+      [tx0 + 1, ty0],
+      [tx0, ty0 + 1],
+      [tx0 + 1, ty0 + 1],
     ];
-    for (const url of candidates) {
-      try {
-        const buf = await fetchBuffer(url);
-        if (buf && buf.length > 2000) {
-          const isPng = buf[0] === 0x89 && buf[1] === 0x50;
-          const isJpg = buf[0] === 0xff && buf[1] === 0xd8;
-          if (isPng || isJpg) return buf;
+
+    await Promise.all(
+      coords.map(async ([tx, ty]) => {
+        const url = `https://tile.openstreetmap.org/${zoom}/${tx}/${ty}.png`;
+        try {
+          const buf = await fetchBuffer(url);
+          if (buf && buf.length > 100 && buf[0] === 0x89) {
+            tiles.push({ tx, ty, dx: tx - tx0, dy: ty - ty0, buffer: buf });
+          }
+        } catch (e) {
+          console.warn('[reports PDF] tile failed', tx, ty, e.message);
         }
-      } catch (e) {
-        console.warn('[reports PDF] map candidate failed:', e.message);
-      }
-    }
-    return null;
+      })
+    );
+
+    if (tiles.length === 0) return null;
+
+    // Marker position in the stitched 512×512 image (2×2 of 256px tiles)
+    const markerPx = {
+      x: (x - tx0) * 256,
+      y: (y - ty0) * 256,
+    };
+
+    return { tiles, markerPx, tileSize: 256, grid: 2, zoom, tx0, ty0 };
   };
 
   const formatDate = (d) => {
@@ -326,19 +365,23 @@ router.get('/:id/pdf', async (req, res) => {
 
     const lat = report.latitude != null ? Number(report.latitude) : null;
     const lng = report.longitude != null ? Number(report.longitude) : null;
-    let mapBuffer = null;
+    let mapTiles = null;
     if (lat != null && lng != null && !Number.isNaN(lat) && !Number.isNaN(lng)) {
       try {
-        mapBuffer = await fetchMapSnapshot(lat, lng);
+        mapTiles = await buildOsmMapTiles(lat, lng, 14);
       } catch (e) {
-        console.warn('[reports PDF] map snapshot failed:', e.message);
+        console.warn('[reports PDF] OSM tiles failed:', e.message);
       }
     }
 
+    // Footer band reserved on every page (must not create an extra page)
+    const FOOTER_BAND = 48;
+
     const doc = new PDFDocument({
       size: 'A4',
-      margins: { top: 50, bottom: 60, left: 50, right: 50 },
+      margins: { top: 48, bottom: FOOTER_BAND + 8, left: 50, right: 50 },
       bufferPages: true,
+      autoFirstPage: true,
       info: {
         Title: `Official Incident Report — ${report.title || refNo}`,
         Author: 'Townhall Participatory Governance Platform',
@@ -351,11 +394,12 @@ router.get('/:id/pdf', async (req, res) => {
     doc.pipe(res);
 
     const left = doc.page.margins.left;
-    const contentWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+    const contentWidth =
+      doc.page.width - doc.page.margins.left - doc.page.margins.right;
+    const maxY = () => doc.page.height - doc.page.margins.bottom;
 
-    // Ensure we never write into the footer band
-    const ensureSpace = (needed = 80) => {
-      if (doc.y + needed > doc.page.height - doc.page.margins.bottom) {
+    const ensureSpace = (needed = 60) => {
+      if (doc.y + needed > maxY()) {
         doc.addPage();
       }
     };
@@ -367,12 +411,12 @@ router.get('/:id/pdf', async (req, res) => {
         .strokeColor(color)
         .lineWidth(width)
         .stroke();
-      doc.moveDown(0.5);
+      doc.moveDown(0.45);
     };
 
     const sectionTitle = (title) => {
-      ensureSpace(40);
-      doc.moveDown(0.4);
+      ensureSpace(36);
+      doc.moveDown(0.35);
       doc.font('Helvetica-Bold').fontSize(11).fillColor('#1B4D3E').text(title.toUpperCase());
       doc
         .moveTo(left, doc.y)
@@ -380,44 +424,46 @@ router.get('/:id/pdf', async (req, res) => {
         .strokeColor('#1B4D3E')
         .lineWidth(0.9)
         .stroke();
-      doc.moveDown(0.45);
+      doc.moveDown(0.4);
       doc.font('Helvetica').fontSize(10).fillColor('#222222');
     };
 
     // ── Top accent bar ──────────────────────────────────────────────────────
-    doc.rect(0, 0, doc.page.width, 10).fill('#1B4D3E');
-    doc.moveDown(1.2);
+    doc.rect(0, 0, doc.page.width, 8).fill('#1B4D3E');
+    doc.y = 28;
 
     // ── Letterhead ──────────────────────────────────────────────────────────
     doc.font('Helvetica-Bold').fontSize(11).fillColor('#1B4D3E')
       .text('REPUBLIC OF ZAMBIA', { align: 'center' });
     doc.font('Helvetica').fontSize(9).fillColor('#333333')
       .text('LOCAL GOVERNMENT — CIVIC PARTICIPATION CHANNEL', { align: 'center' });
-    doc.moveDown(0.2);
+    doc.moveDown(0.15);
     doc.font('Helvetica-Bold').fontSize(16).fillColor('#1B2420')
       .text('TOWNHALL', { align: 'center' });
     doc.font('Helvetica').fontSize(9).fillColor('#555555')
       .text('Digital Participatory Governance Platform', { align: 'center' });
-    doc.moveDown(0.35);
+    doc.moveDown(0.3);
     hr('#1B4D3E', 1.5);
 
     doc.font('Helvetica-Bold').fontSize(13).fillColor('#1B2420')
       .text('OFFICIAL INCIDENT REPORT', { align: 'center' });
-    doc.moveDown(0.5);
+    doc.moveDown(0.4);
 
     // ── Document control ────────────────────────────────────────────────────
     const col2 = left + contentWidth / 2;
     const metaY = doc.y;
     doc.font('Helvetica').fontSize(9).fillColor('#222222');
     doc.text(`Reference No.: ${refNo}`, left, metaY, { width: contentWidth / 2 - 8 });
-    doc.text(`Date of Issue: ${formatDate(new Date())}`, col2, metaY, { width: contentWidth / 2 - 8 });
+    doc.text(`Date of Issue: ${formatDate(new Date())}`, col2, metaY, {
+      width: contentWidth / 2 - 8,
+    });
     doc.text(`Date Submitted: ${formatDate(report.created_at)}`, left, metaY + 14, {
       width: contentWidth / 2 - 8,
     });
     doc.text(`Status: ${statusLabel(report.status)}`, col2, metaY + 14, {
       width: contentWidth / 2 - 8,
     });
-    doc.y = metaY + 34;
+    doc.y = metaY + 32;
     hr('#C9C4B4', 0.6);
 
     // ── 1. Particulars ──────────────────────────────────────────────────────
@@ -449,54 +495,63 @@ router.get('/:id/pdf', async (req, res) => {
         lineGap: 2,
       });
 
-    // ── 3. Location snapshot ────────────────────────────────────────────────
+    // ── 3. Real map snapshot (OSM tiles) ─────────────────────────────────────
     sectionTitle('3. Location Snapshot');
-    if (mapBuffer) {
-      try {
-        ensureSpace(240);
-        const mapW = Math.min(contentWidth, 480);
-        const mapH = 210;
-        const mapX = left + (contentWidth - mapW) / 2;
-        const mapY = doc.y;
-        doc.rect(mapX - 1, mapY - 1, mapW + 2, mapH + 2).strokeColor('#1B4D3E').lineWidth(0.8).stroke();
-        doc.image(mapBuffer, mapX, mapY, { width: mapW, height: mapH });
-        doc.y = mapY + mapH + 8;
-        doc.font('Helvetica-Oblique').fontSize(8).fillColor('#666666')
-          .text(
-            `Map snapshot (OpenStreetMap) · ${lat.toFixed(6)}, ${lng.toFixed(6)}`,
-            { align: 'center' }
-          );
-      } catch (e) {
-        console.warn('[reports PDF] embed map failed:', e.message);
-        mapBuffer = null; // fall through to card
-      }
-    }
-    if (!mapBuffer && lat != null && lng != null && !Number.isNaN(lat) && !Number.isNaN(lng)) {
-      ensureSpace(120);
-      const cardH = 100;
-      const y0 = doc.y;
-      doc.roundedRect(left, y0, contentWidth, cardH, 5).fill('#F4F7F5');
-      doc.roundedRect(left, y0, contentWidth, cardH, 5).strokeColor('#1B4D3E').lineWidth(1).stroke();
-      doc.rect(left, y0, 5, cardH).fill('#1B4D3E');
+    if (mapTiles && mapTiles.tiles.length > 0) {
+      ensureSpace(250);
+      const displaySize = Math.min(contentWidth, 420); // square-ish map
+      const scale = displaySize / (mapTiles.tileSize * mapTiles.grid);
+      const mapW = mapTiles.tileSize * mapTiles.grid * scale;
+      const mapH = mapW;
+      const mapX = left + (contentWidth - mapW) / 2;
+      const mapY = doc.y;
 
-      doc.font('Helvetica-Bold').fontSize(10).fillColor('#1B4D3E')
-        .text('GEOGRAPHIC REFERENCE', left + 18, y0 + 14, { width: contentWidth - 36 });
-      doc.font('Helvetica').fontSize(9).fillColor('#333333')
-        .text(report.location || 'Location as recorded on the incident', left + 18, y0 + 32, {
-          width: contentWidth - 36,
-        });
-      doc.font('Helvetica-Bold').fontSize(9).fillColor('#1B2420')
-        .text(`Latitude:   ${lat.toFixed(6)}`, left + 18, y0 + 52);
-      doc.text(`Longitude:  ${lng.toFixed(6)}`, left + 18, y0 + 66);
-      doc.font('Helvetica-Oblique').fontSize(7).fillColor('#666666')
+      // Frame
+      doc.rect(mapX - 1, mapY - 1, mapW + 2, mapH + 2)
+        .strokeColor('#1B4D3E')
+        .lineWidth(1)
+        .stroke();
+
+      // Draw each tile
+      for (const t of mapTiles.tiles) {
+        const dx = mapX + t.dx * mapTiles.tileSize * scale;
+        const dy = mapY + t.dy * mapTiles.tileSize * scale;
+        try {
+          doc.image(t.buffer, dx, dy, {
+            width: mapTiles.tileSize * scale,
+            height: mapTiles.tileSize * scale,
+          });
+        } catch (e) {
+          console.warn('[reports PDF] tile draw failed', e.message);
+        }
+      }
+
+      // Red pin marker at incident coordinates
+      const mx = mapX + mapTiles.markerPx.x * scale;
+      const my = mapY + mapTiles.markerPx.y * scale;
+      doc.save();
+      doc.circle(mx, my - 6, 6).fill('#C62828');
+      doc.circle(mx, my - 6, 2.5).fill('#FFFFFF');
+      doc
+        .moveTo(mx, my)
+        .lineTo(mx - 4, my + 8)
+        .lineTo(mx + 4, my + 8)
+        .fill('#C62828');
+      doc.restore();
+
+      doc.y = mapY + mapH + 8;
+      doc.font('Helvetica-Oblique').fontSize(8).fillColor('#666666')
         .text(
-          'Live map tiles were unavailable at generation time. Coordinates above are authoritative.',
-          left + 18,
-          y0 + 82,
-          { width: contentWidth - 36 }
+          `OpenStreetMap snapshot · ${lat.toFixed(6)}, ${lng.toFixed(6)} · © OpenStreetMap contributors`,
+          { align: 'center' }
         );
-      doc.y = y0 + cardH + 10;
-    } else if (lat == null || lng == null || Number.isNaN(lat) || Number.isNaN(lng)) {
+    } else if (lat != null && lng != null && !Number.isNaN(lat) && !Number.isNaN(lng)) {
+      doc.font('Helvetica').fontSize(10).fillColor('#666666')
+        .text(
+          `Map tiles could not be retrieved from OpenStreetMap at generation time. ` +
+            `Recorded coordinates: ${lat.toFixed(6)}, ${lng.toFixed(6)}.`
+        );
+    } else {
       doc.font('Helvetica').fontSize(10).fillColor('#666666')
         .text('No geographic coordinates were provided for this incident.');
     }
@@ -509,23 +564,27 @@ router.get('/:id/pdf', async (req, res) => {
     } else {
       doc.font('Helvetica').fontSize(10).fillColor('#333333')
         .text(`${imagePaths.length} image(s) attached by the reporting citizen.`);
-      doc.moveDown(0.35);
+      doc.moveDown(0.3);
 
       const gap = 12;
       const imgW = (contentWidth - gap) / 2;
-      const imgH = 150;
+      const imgH = 140;
       let col = 0;
       let rowY = doc.y;
 
       for (let i = 0; i < imagePaths.length; i++) {
-        if (rowY + imgH > doc.page.height - doc.page.margins.bottom) {
+        if (rowY + imgH > maxY()) {
           doc.addPage();
           rowY = doc.page.margins.top;
           col = 0;
         }
         const x = left + col * (imgW + gap);
         try {
-          doc.image(imagePaths[i], x, rowY, { fit: [imgW, imgH], align: 'center', valign: 'center' });
+          doc.image(imagePaths[i], x, rowY, {
+            fit: [imgW, imgH],
+            align: 'center',
+            valign: 'center',
+          });
         } catch (e) {
           doc.rect(x, rowY, imgW, imgH).strokeColor('#cccccc').stroke();
           doc.font('Helvetica').fontSize(8).fillColor('#999999')
@@ -534,10 +593,10 @@ router.get('/:id/pdf', async (req, res) => {
         col += 1;
         if (col >= 2) {
           col = 0;
-          rowY += imgH + 14;
+          rowY += imgH + 12;
         }
       }
-      doc.y = col === 0 ? rowY : rowY + imgH + 10;
+      doc.y = col === 0 ? rowY : rowY + imgH + 8;
     }
 
     // ── 5. Official responses ───────────────────────────────────────────────
@@ -548,14 +607,14 @@ router.get('/:id/pdf', async (req, res) => {
           '(e.g. police officer, engineer, water & sanitation officer, district administration, ' +
           'or other authorised ministry staff).'
       );
-    doc.moveDown(0.4);
+    doc.moveDown(0.35);
 
     if (responses.length === 0) {
       doc.font('Helvetica').fontSize(10).fillColor('#666666')
         .text('No official response has been recorded on this report to date.');
     } else {
       responses.forEach((r, idx) => {
-        ensureSpace(70);
+        ensureSpace(64);
         const roleLabel =
           r.author_role === 'administrator'
             ? 'Administrator'
@@ -567,15 +626,15 @@ router.get('/:id/pdf', async (req, res) => {
           .text(`Response ${idx + 1} — ${r.author_name || 'Officer'} · ${roleLabel}`);
         doc.font('Helvetica').fontSize(8).fillColor('#666666')
           .text(`Dated: ${formatDate(r.created_at)}`);
-        doc.moveDown(0.15);
+        doc.moveDown(0.12);
         doc.font('Helvetica').fontSize(10).fillColor('#222222')
           .text(r.message || '—', { align: 'justify', lineGap: 2 });
-        doc.moveDown(0.45);
+        doc.moveDown(0.4);
       });
     }
 
     // ── 6. Certification ────────────────────────────────────────────────────
-    ensureSpace(120);
+    ensureSpace(110);
     sectionTitle('6. Certification');
     doc.font('Helvetica').fontSize(9).fillColor('#222222')
       .text(
@@ -583,23 +642,24 @@ router.get('/:id/pdf', async (req, res) => {
           'It reflects the incident particulars, geographic reference, citizen-submitted evidence, ' +
           'and any official responses recorded by the assigned officer at the time of generation.'
       );
-    doc.moveDown(0.8);
+    doc.moveDown(0.7);
     doc.font('Helvetica').fontSize(10).fillColor('#222222')
       .text('_________________________________');
     doc.text('Authorised Officer / System Record');
-    doc.moveDown(0.25);
+    doc.moveDown(0.2);
     doc.font('Helvetica').fontSize(9)
       .text(`Generated: ${formatDate(new Date())}`);
     doc.text(`Reference: ${refNo}`);
 
-    // ── Footer on every page ────────────────────────────────────────────────
+    // ── Footer on every existing page (does NOT create new pages) ───────────
     const range = doc.bufferedPageRange();
     for (let i = 0; i < range.count; i++) {
       doc.switchToPage(range.start + i);
-      const footerY = doc.page.height - 40;
+      const footerY = doc.page.height - 36;
+      // Draw inside the page; lineBreak:false prevents pdfkit from overflowing a new page
       doc
-        .moveTo(left, footerY - 8)
-        .lineTo(left + contentWidth, footerY - 8)
+        .moveTo(left, footerY - 10)
+        .lineTo(left + contentWidth, footerY - 10)
         .strokeColor('#C9C4B4')
         .lineWidth(0.5)
         .stroke();
@@ -608,7 +668,13 @@ router.get('/:id/pdf', async (req, res) => {
           `Townhall · Official Incident Report · For official and citizen reference · Page ${i + 1} of ${range.count}`,
           left,
           footerY,
-          { width: contentWidth, align: 'center', lineBreak: false }
+          {
+            width: contentWidth,
+            align: 'center',
+            lineBreak: false,
+            height: 12,
+            ellipsis: false,
+          }
         );
     }
 
