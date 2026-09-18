@@ -826,18 +826,47 @@ function ResponderPanel({ reports, loading, updateStatus }) {
                 <BarChart
                   data={chartData}
                   margin={{ top: 8, right: 16, left: 0, bottom: 8 }}
-                  onClick={(state) => {
-                    if (state && state.activePayload && state.activePayload[0]) {
-                      setSelectedCategory(state.activePayload[0].payload);
-                    }
-                  }}
                 >
                   <XAxis dataKey="name" tick={{ fontSize: 12 }} />
                   <YAxis allowDecimals={false} tick={{ fontSize: 12 }} />
                   <Tooltip />
-                  <Bar dataKey="count" fill="#3B5D3A" cursor="pointer" radius={[6, 6, 0, 0]} />
+                  <Bar
+                    dataKey="count"
+                    fill="#3B5D3A"
+                    cursor="pointer"
+                    radius={[6, 6, 0, 0]}
+                    onClick={(data) => {
+                      // data.payload holds the full category object including reports[]
+                      const payload = data?.payload || data;
+                      if (payload && payload.name) {
+                        setSelectedCategory(payload);
+                      }
+                    }}
+                  />
                 </BarChart>
               </ResponsiveContainer>
+            </div>
+
+            {/* Also allow clicking category labels as a fallback list */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
+              {chartData.map((c) => (
+                <button
+                  key={c.name}
+                  type="button"
+                  onClick={() => setSelectedCategory(c)}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: 8,
+                    border: selectedCategory?.name === c.name ? '2px solid #3B5D3A' : '1px solid var(--border)',
+                    background: selectedCategory?.name === c.name ? 'rgba(59,93,58,0.12)' : 'var(--surface2)',
+                    color: 'var(--text)',
+                    cursor: 'pointer',
+                    fontSize: 13,
+                  }}
+                >
+                  {c.name}: <strong>{c.count}</strong>
+                </button>
+              ))}
             </div>
 
             {selectedCategory && (
