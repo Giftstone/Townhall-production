@@ -183,19 +183,43 @@ router.get('/:id/pdf', async (req, res) => {
   const http = require('http');
   const PDFDocument = require('pdfkit');
 
-  const fetchBuffer = (url, timeoutMs = 8000) =>
+  const fetchBuffer = (url, timeoutMs = 10000, redirects = 0) =>
     new Promise((resolve, reject) => {
       try {
         const lib = url.startsWith('https') ? https : http;
-        const reqNet = lib.get(url, { timeout: timeoutMs }, (resp) => {
-          if (resp.statusCode && resp.statusCode >= 400) {
-            resp.resume();
-            return reject(new Error(`HTTP ${resp.statusCode}`));
+        const reqNet = lib.get(
+          url,
+          {
+            timeout: timeoutMs,
+            headers: {
+              'User-Agent': 'TownhallPDF/1.0 (civic-report; +https://virtual-townhall.vercel.app)',
+              Accept: 'image/png,image/jpeg,image/*;q=0.8,*/*;q=0.5',
+            },
+          },
+          (resp) => {
+            // Follow redirects (common for static map CDNs)
+            if (
+              resp.statusCode &&
+              resp.statusCode >= 300 &&
+              resp.statusCode < 400 &&
+              resp.headers.location &&
+              redirects < 4
+            ) {
+              resp.resume();
+              const next = resp.headers.location.startsWith('http')
+                ? resp.headers.location
+                : new URL(resp.headers.location, url).toString();
+              return resolve(fetchBuffer(next, timeoutMs, redirects + 1));
+            }
+            if (resp.statusCode && resp.statusCode >= 400) {
+              resp.resume();
+              return reject(new Error(`HTTP ${resp.statusCode}`));
+            }
+            const chunks = [];
+            resp.on('data', (c) => chunks.push(c));
+            resp.on('end', () => resolve(Buffer.concat(chunks)));
           }
-          const chunks = [];
-          resp.on('data', (c) => chunks.push(c));
-          resp.on('end', () => resolve(Buffer.concat(chunks)));
-        });
+        );
         reqNet.on('error', reject);
         reqNet.on('timeout', () => {
           reqNet.destroy();
@@ -205,6 +229,71 @@ router.get('/:id/pdf', async (req, res) => {
         reject(e);
       }
     });
+
+  /** Try several free static-map endpoints; return first usable image buffer. */
+  const fetchMapSnapshot = async (lat, lng) => {
+    const candidates = [
+      // OpenStreetMap.de static maps
+      `https://staticmap.openstreetmap.de/staticmap.php?center=${lat},${lng}&zoom=14&size=640x320&maptype=mapnik&markers=${lat},${lng},red-pushpin`,
+      // Alternative OSM static service
+      `https://staticmap.openstreetmap.de/staticmap.php?center=${lat},${lng}&zoom=15&size=600x280&markers=${lat},${lng},red-pushpin`,
+      // OpenStreetMap France static (sometimes reachable when .de is blocked)
+      `https://staticmap.openstreetmap.fr/osmfr/?center=${lat},${lng}&zoom=14&width=640&height=320&markers=${lat},${lng}`,
+    ];
+    for (const url of candidates) {
+      try {
+        const buf = await fetchBuffer(url);
+        // Basic sanity: non-trivial size and looks like an image (PNG/JPEG magic)
+        if (buf && buf.length > 2000) {
+          const isPng = buf[0] === 0x89 && buf[1] === 0x50;
+          const isJpg = buf[0] === 0xff && buf[1] === 0xd8;
+          if (isPng || isJpg) return buf;
+        }
+      } catch (e) {
+        console.warn('[reports PDF] map candidate failed:', url.slice(0, 60), e.message);
+      }
+    }
+    return null;
+  };
+
+  /** Draw a formal location card when live map tiles are unavailable. */
+  const drawLocationCard = (doc, left, width, lat, lng, locationName) => {
+    const cardH = 110;
+    const y0 = doc.y;
+    doc.save();
+    doc.roundedRect(left, y0, width, cardH, 6).fillAndStroke('#F4F7F5', '#1B4D3E');
+    // Accent bar
+    doc.rect(left, y0, 6, cardH).fill('#1B4D3E');
+    // Pin glyph (simple circle + stem)
+    const cx = left + 36;
+    const cy = y0 + 42;
+    doc.circle(cx, cy - 8, 10).fill('#C26A33');
+    doc.circle(cx, cy - 8, 4).fill('#FFFFFF');
+    doc
+      .moveTo(cx, cy + 2)
+      .lineTo(cx - 7, cy + 16)
+      .lineTo(cx + 7, cy + 16)
+      .fill('#C26A33');
+
+    doc.fillColor('#1B2420').font('Helvetica-Bold').fontSize(10)
+      .text('GEOGRAPHIC REFERENCE', left + 60, y0 + 14, { width: width - 80 });
+    doc.font('Helvetica').fontSize(9).fillColor('#333333')
+      .text(locationName || 'Location as recorded on the incident', left + 60, y0 + 32, {
+        width: width - 80,
+      });
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('#1B4D3E')
+      .text(`Latitude:  ${Number(lat).toFixed(6)}`, left + 60, y0 + 56);
+    doc.text(`Longitude: ${Number(lng).toFixed(6)}`, left + 60, y0 + 72);
+    doc.font('Helvetica-Oblique').fontSize(7).fillColor('#666666')
+      .text(
+        'Live map tiles were unavailable from the map service at generation time. Coordinates remain authoritative.',
+        left + 60,
+        y0 + 90,
+        { width: width - 80 }
+      );
+    doc.restore();
+    doc.y = y0 + cardH + 8;
+  };
 
   const formatDate = (d) => {
     if (!d) return '—';
@@ -281,16 +370,13 @@ router.get('/:id/pdf', async (req, res) => {
       }
     }
 
-    // Optional static map snapshot
+    // Static map snapshot (with multi-source fallback)
     let mapBuffer = null;
     const lat = report.latitude != null ? Number(report.latitude) : null;
     const lng = report.longitude != null ? Number(report.longitude) : null;
     if (lat != null && lng != null && !Number.isNaN(lat) && !Number.isNaN(lng)) {
-      const mapUrl =
-        `https://staticmap.openstreetmap.de/staticmap.php?center=${lat},${lng}` +
-        `&zoom=15&size=600x280&maptype=mapnik&markers=${lat},${lng},red-pushpin`;
       try {
-        mapBuffer = await fetchBuffer(mapUrl);
+        mapBuffer = await fetchMapSnapshot(lat, lng);
       } catch (e) {
         console.warn('[reports PDF] map snapshot failed:', e.message);
       }
@@ -404,17 +490,22 @@ router.get('/:id/pdf', async (req, res) => {
         const mapW = Math.min(contentWidth, 480);
         const mapH = 220;
         const mapX = left + (contentWidth - mapW) / 2;
+        // border frame
+        doc.rect(mapX - 1, doc.y - 1, mapW + 2, mapH + 2).strokeColor('#1B4D3E').lineWidth(0.8).stroke();
         doc.image(mapBuffer, mapX, doc.y, { width: mapW, height: mapH });
-        doc.y += mapH + 6;
+        doc.y += mapH + 8;
         doc.font('Helvetica-Oblique').fontSize(8).fillColor('#666666')
-          .text('Map source: OpenStreetMap static snapshot (indicative only).', { align: 'center', width: contentWidth });
+          .text(
+            `Map snapshot (OpenStreetMap) · Coordinates: ${lat.toFixed(6)}, ${lng.toFixed(6)}`,
+            { align: 'center', width: contentWidth }
+          );
       } catch (e) {
-        doc.font('Helvetica').fontSize(9).fillColor('#666666')
-          .text('Map snapshot could not be embedded. Coordinates are recorded above.');
+        console.warn('[reports PDF] embed map failed:', e.message);
+        drawLocationCard(doc, left, contentWidth, lat, lng, report.location);
       }
     } else if (lat != null && lng != null) {
-      doc.font('Helvetica').fontSize(9).fillColor('#666666')
-        .text(`Map snapshot unavailable. Recorded coordinates: ${lat.toFixed(6)}, ${lng.toFixed(6)}.`);
+      // Guaranteed visual when external map services are blocked (common on cloud hosts)
+      drawLocationCard(doc, left, contentWidth, lat, lng, report.location);
     } else {
       doc.font('Helvetica').fontSize(9).fillColor('#666666')
         .text('No geographic coordinates were provided for this incident.');
