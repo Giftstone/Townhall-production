@@ -177,10 +177,61 @@ router.patch(
 );
 
 // ─── GET /api/reports/:id/pdf ────────────────────────────────────────────────
-// Citizen (or any authenticated user) can download the report + official responses as PDF
+// Official-style PDF: report details, map snapshot, evidence images, official responses
 router.get('/:id/pdf', async (req, res) => {
+  const https = require('https');
+  const http = require('http');
+  const PDFDocument = require('pdfkit');
+
+  const fetchBuffer = (url, timeoutMs = 8000) =>
+    new Promise((resolve, reject) => {
+      try {
+        const lib = url.startsWith('https') ? https : http;
+        const reqNet = lib.get(url, { timeout: timeoutMs }, (resp) => {
+          if (resp.statusCode && resp.statusCode >= 400) {
+            resp.resume();
+            return reject(new Error(`HTTP ${resp.statusCode}`));
+          }
+          const chunks = [];
+          resp.on('data', (c) => chunks.push(c));
+          resp.on('end', () => resolve(Buffer.concat(chunks)));
+        });
+        reqNet.on('error', reject);
+        reqNet.on('timeout', () => {
+          reqNet.destroy();
+          reject(new Error('timeout'));
+        });
+      } catch (e) {
+        reject(e);
+      }
+    });
+
+  const formatDate = (d) => {
+    if (!d) return '—';
+    try {
+      return new Date(d).toLocaleString('en-GB', {
+        day: '2-digit',
+        month: 'long',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    } catch {
+      return String(d);
+    }
+  };
+
+  const statusLabel = (s) => {
+    const map = {
+      pending: 'PENDING',
+      assigned: 'ASSIGNED',
+      in_progress: 'IN PROGRESS',
+      resolved: 'RESOLVED',
+    };
+    return map[s] || String(s || 'UNKNOWN').toUpperCase();
+  };
+
   try {
-    const PDFDocument = require('pdfkit');
     const reportId = req.params.id;
 
     const reportResult = await pool.query(
@@ -202,62 +253,293 @@ router.get('/:id/pdf', async (req, res) => {
     );
     const responses = responsesResult.rows;
 
-    const doc = new PDFDocument({ margin: 50, size: 'A4' });
-    const filename = `Townhall-Report-${String(report.id).slice(0, 8)}.pdf`;
+    const refNo = `TH/${String(report.category || 'GEN').slice(0, 4).toUpperCase()}/${String(report.id).replace(/-/g, '').slice(0, 8).toUpperCase()}`;
+    const filename = `Townhall-Official-Report-${String(report.id).slice(0, 8)}.pdf`;
+
+    // Collect image paths (local uploads)
+    const imagePaths = [];
+    const urls = Array.isArray(report.image_urls) && report.image_urls.length
+      ? report.image_urls
+      : report.image_url
+        ? [report.image_url]
+        : [];
+    for (const u of urls) {
+      if (!u) continue;
+      const rel = String(u).replace(/^\//, '');
+      const abs = path.isAbsolute(rel) ? rel : path.join(__dirname, '..', rel.startsWith('uploads') ? rel : path.join('uploads', path.basename(rel)));
+      // Also try direct uploads folder by basename
+      const candidates = [
+        abs,
+        path.join(uploadDir, path.basename(String(u))),
+        path.join(__dirname, '..', 'uploads', path.basename(String(u))),
+      ];
+      for (const c of candidates) {
+        if (fs.existsSync(c)) {
+          imagePaths.push(c);
+          break;
+        }
+      }
+    }
+
+    // Optional static map snapshot
+    let mapBuffer = null;
+    const lat = report.latitude != null ? Number(report.latitude) : null;
+    const lng = report.longitude != null ? Number(report.longitude) : null;
+    if (lat != null && lng != null && !Number.isNaN(lat) && !Number.isNaN(lng)) {
+      const mapUrl =
+        `https://staticmap.openstreetmap.de/staticmap.php?center=${lat},${lng}` +
+        `&zoom=15&size=600x280&maptype=mapnik&markers=${lat},${lng},red-pushpin`;
+      try {
+        mapBuffer = await fetchBuffer(mapUrl);
+      } catch (e) {
+        console.warn('[reports PDF] map snapshot failed:', e.message);
+      }
+    }
+
+    const doc = new PDFDocument({
+      margin: 50,
+      size: 'A4',
+      bufferPages: true,
+      info: {
+        Title: `Official Incident Report — ${report.title || refNo}`,
+        Author: 'Townhall Participatory Governance Platform',
+        Subject: 'Official civic incident report',
+      },
+    });
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     doc.pipe(res);
 
-    // Header
-    doc.fontSize(18).fillColor('#1B2420').text('TOWNHALL', { continued: false });
-    doc.fontSize(11).fillColor('#555555').text('Digital Participatory Governance Platform');
-    doc.moveDown(0.5);
-    doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke('#3B5D3A');
-    doc.moveDown();
+    const pageWidth = doc.page.width;
+    const left = 50;
+    const right = pageWidth - 50;
+    const contentWidth = right - left;
 
-    // Report title
-    doc.fontSize(16).fillColor('#1B2420').text(report.title || 'Untitled Report');
+    // ── Letterhead ──────────────────────────────────────────────────────────
+    doc.rect(0, 0, pageWidth, 8).fill('#1B4D3E');
+
+    doc.fillColor('#1B4D3E')
+      .font('Helvetica-Bold')
+      .fontSize(11)
+      .text('REPUBLIC OF ZAMBIA', left, 28, { align: 'center', width: contentWidth });
+
+    doc.font('Helvetica')
+      .fontSize(9)
+      .fillColor('#333333')
+      .text('LOCAL GOVERNMENT — CIVIC PARTICIPATION CHANNEL', { align: 'center', width: contentWidth });
+
+    doc.moveDown(0.25);
+    doc.font('Helvetica-Bold')
+      .fontSize(14)
+      .fillColor('#1B2420')
+      .text('TOWNHALL', { align: 'center', width: contentWidth });
+
+    doc.font('Helvetica')
+      .fontSize(9)
+      .fillColor('#555555')
+      .text('Digital Participatory Governance Platform', { align: 'center', width: contentWidth });
+
+    doc.moveDown(0.4);
+    doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#1B4D3E').lineWidth(1.5).stroke();
+    doc.moveDown(0.6);
+
+    // ── Document control block ──────────────────────────────────────────────
+    doc.font('Helvetica-Bold').fontSize(12).fillColor('#1B2420')
+      .text('OFFICIAL INCIDENT REPORT', { align: 'center', width: contentWidth });
+    doc.moveDown(0.5);
+
+    const metaTop = doc.y;
+    doc.font('Helvetica').fontSize(9).fillColor('#222222');
+    doc.text(`Reference No.: ${refNo}`, left, metaTop);
+    doc.text(`Date of Issue: ${formatDate(new Date())}`, left + 280, metaTop);
+    doc.text(`Date Submitted: ${formatDate(report.created_at)}`, left, metaTop + 14);
+    doc.text(`Status: ${statusLabel(report.status)}`, left + 280, metaTop + 14);
+    doc.y = metaTop + 36;
+
+    doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#C9C4B4').lineWidth(0.5).stroke();
+    doc.moveDown(0.6);
+
+    // ── Section 1: Particulars ───────────────────────────────────────────────
+    const section = (title) => {
+      doc.moveDown(0.3);
+      doc.font('Helvetica-Bold').fontSize(10).fillColor('#1B4D3E').text(title.toUpperCase());
+      doc.moveTo(left, doc.y + 1).lineTo(left + 180, doc.y + 1).strokeColor('#1B4D3E').lineWidth(0.8).stroke();
+      doc.moveDown(0.45);
+      doc.font('Helvetica').fontSize(9).fillColor('#222222');
+    };
+
+    section('1. Report Particulars');
+    doc.font('Helvetica-Bold').text('Title: ', { continued: true });
+    doc.font('Helvetica').text(report.title || '—');
+    doc.font('Helvetica-Bold').text('Category: ', { continued: true });
+    doc.font('Helvetica').text(report.category || '—');
+    doc.font('Helvetica-Bold').text('Location / Ward: ', { continued: true });
+    doc.font('Helvetica').text(report.location || '—');
+    if (lat != null && lng != null) {
+      doc.font('Helvetica-Bold').text('Coordinates: ', { continued: true });
+      doc.font('Helvetica').text(`${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+    }
+    doc.font('Helvetica-Bold').text('Reported by: ', { continued: true });
+    doc.font('Helvetica').text(report.reporter_name || 'Citizen');
+    doc.font('Helvetica-Bold').text('Assigned officer: ', { continued: true });
+    doc.font('Helvetica').text(
+      report.assignee_name
+        ? `${report.assignee_name} (Ministry / Agency officer)`
+        : 'Not yet assigned'
+    );
+
+    // ── Section 2: Narrative ─────────────────────────────────────────────────
+    section('2. Description of the Incident');
+    doc.font('Helvetica').fontSize(9).fillColor('#222222')
+      .text(report.description || 'No description provided.', {
+        align: 'justify',
+        lineGap: 2,
+      });
+
+    // ── Section 3: Location map ──────────────────────────────────────────────
+    section('3. Location Snapshot');
+    if (mapBuffer && mapBuffer.length > 500) {
+      try {
+        const mapW = Math.min(contentWidth, 480);
+        const mapH = 220;
+        const mapX = left + (contentWidth - mapW) / 2;
+        doc.image(mapBuffer, mapX, doc.y, { width: mapW, height: mapH });
+        doc.y += mapH + 6;
+        doc.font('Helvetica-Oblique').fontSize(8).fillColor('#666666')
+          .text('Map source: OpenStreetMap static snapshot (indicative only).', { align: 'center', width: contentWidth });
+      } catch (e) {
+        doc.font('Helvetica').fontSize(9).fillColor('#666666')
+          .text('Map snapshot could not be embedded. Coordinates are recorded above.');
+      }
+    } else if (lat != null && lng != null) {
+      doc.font('Helvetica').fontSize(9).fillColor('#666666')
+        .text(`Map snapshot unavailable. Recorded coordinates: ${lat.toFixed(6)}, ${lng.toFixed(6)}.`);
+    } else {
+      doc.font('Helvetica').fontSize(9).fillColor('#666666')
+        .text('No geographic coordinates were provided for this incident.');
+    }
+
+    // ── Section 4: Evidence ──────────────────────────────────────────────────
+    section('4. Supporting Evidence (Photographs)');
+    if (imagePaths.length === 0) {
+      doc.font('Helvetica').fontSize(9).fillColor('#666666')
+        .text('No photographic evidence was attached to this report.');
+    } else {
+      doc.font('Helvetica').fontSize(9).fillColor('#333333')
+        .text(`${imagePaths.length} image(s) attached by the reporting citizen.`);
+      doc.moveDown(0.3);
+
+      const maxPerRow = 2;
+      const gap = 12;
+      const imgW = (contentWidth - gap) / maxPerRow;
+      const imgH = 150;
+      let col = 0;
+      let rowY = doc.y;
+
+      for (let i = 0; i < imagePaths.length; i++) {
+        // New page if needed
+        if (rowY + imgH > doc.page.height - 80) {
+          doc.addPage();
+          rowY = 50;
+          col = 0;
+        }
+        const x = left + col * (imgW + gap);
+        try {
+          doc.image(imagePaths[i], x, rowY, {
+            fit: [imgW, imgH],
+            align: 'center',
+            valign: 'center',
+          });
+        } catch (e) {
+          doc.rect(x, rowY, imgW, imgH).stroke('#cccccc');
+          doc.font('Helvetica').fontSize(8).fillColor('#999')
+            .text('Image unavailable', x + 8, rowY + imgH / 2);
+        }
+        col += 1;
+        if (col >= maxPerRow) {
+          col = 0;
+          rowY += imgH + 16;
+        }
+      }
+      if (col !== 0) {
+        doc.y = rowY + imgH + 10;
+      } else {
+        doc.y = rowY + 4;
+      }
+    }
+
+    // ── Section 5: Official responses ────────────────────────────────────────
+    // Ensure space
+    if (doc.y > doc.page.height - 160) doc.addPage();
+
+    section('5. Official Response(s) by Assigned Officer');
+    doc.font('Helvetica-Oblique').fontSize(8).fillColor('#555555')
+      .text(
+        'Official responses are posted only by the officer assigned to this incident ' +
+        '(e.g. police officer, engineer, water & sanitation officer, district administration, or other authorised ministry staff).'
+      );
     doc.moveDown(0.4);
 
-    // Meta
-    doc.fontSize(10).fillColor('#333333');
-    doc.text(`Category: ${report.category || '—'}`);
-    doc.text(`Status: ${report.status || '—'}`);
-    doc.text(`Location: ${report.location || '—'}`);
-    if (report.latitude != null && report.longitude != null) {
-      doc.text(`Coordinates: ${report.latitude}, ${report.longitude}`);
-    }
-    doc.text(`Reporter: ${report.reporter_name || '—'}`);
-    doc.text(`Assigned to: ${report.assignee_name || 'Unassigned'}`);
-    doc.text(`Submitted: ${report.created_at ? new Date(report.created_at).toLocaleString() : '—'}`);
-    doc.moveDown();
-
-    // Description
-    doc.fontSize(12).fillColor('#1B2420').text('Description');
-    doc.fontSize(10).fillColor('#333333').text(report.description || 'No description provided.', {
-      align: 'left',
-    });
-    doc.moveDown();
-
-    // Official responses
-    doc.fontSize(12).fillColor('#1B2420').text('Official Responses');
-    doc.moveDown(0.3);
-
     if (responses.length === 0) {
-      doc.fontSize(10).fillColor('#666666').text('No official responses have been posted yet.');
+      doc.font('Helvetica').fontSize(9).fillColor('#666666')
+        .text('No official response has been recorded on this report to date.');
     } else {
       responses.forEach((r, idx) => {
-        doc.fontSize(10).fillColor('#3B5D3A')
-          .text(`${idx + 1}. ${r.author_name || 'Official'} (${r.author_role || 'responder'}) — ${r.created_at ? new Date(r.created_at).toLocaleString() : ''}`);
-        doc.fontSize(10).fillColor('#333333').text(r.message || '', { indent: 10 });
-        doc.moveDown(0.4);
+        if (doc.y > doc.page.height - 100) doc.addPage();
+        const roleLabel =
+          r.author_role === 'administrator'
+            ? 'Administrator'
+            : r.author_role === 'responder'
+              ? 'Assigned Officer (Ministry / Agency)'
+              : (r.author_role || 'Officer');
+
+        doc.font('Helvetica-Bold').fontSize(9).fillColor('#1B4D3E')
+          .text(`Response ${idx + 1} — ${r.author_name || 'Officer'} · ${roleLabel}`);
+        doc.font('Helvetica').fontSize(8).fillColor('#666666')
+          .text(`Dated: ${formatDate(r.created_at)}`);
+        doc.moveDown(0.15);
+        doc.font('Helvetica').fontSize(9).fillColor('#222222')
+          .text(r.message || '—', { align: 'justify', lineGap: 2 });
+        doc.moveDown(0.5);
       });
     }
 
-    doc.moveDown();
-    doc.fontSize(8).fillColor('#888888')
-      .text(`Generated by Townhall on ${new Date().toLocaleString()}`, { align: 'center' });
+    // ── Certification / signature block ─────────────────────────────────────
+    if (doc.y > doc.page.height - 140) doc.addPage();
+    doc.moveDown(1);
+    doc.moveTo(left, doc.y).lineTo(right, doc.y).strokeColor('#C9C4B4').lineWidth(0.5).stroke();
+    doc.moveDown(0.6);
+
+    section('6. Certification');
+    doc.font('Helvetica').fontSize(9).fillColor('#222222')
+      .text(
+        'This document is generated from the Townhall digital participatory governance system. ' +
+        'It reflects the incident particulars, geographic reference, citizen-submitted evidence, ' +
+        'and any official responses recorded by the assigned officer at the time of generation.'
+      );
+    doc.moveDown(0.8);
+
+    doc.font('Helvetica').fontSize(9).fillColor('#222222');
+    doc.text('_________________________________');
+    doc.text('Authorised Officer / System Record');
+    doc.moveDown(0.3);
+    doc.text(`Generated: ${formatDate(new Date())}`);
+    doc.text(`Reference: ${refNo}`);
+
+    // Footer on each page
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      doc.switchToPage(i);
+      doc.font('Helvetica').fontSize(7).fillColor('#888888')
+        .text(
+          'Townhall · Official Incident Report · For official and citizen reference · Page ' +
+            `${i - range.start + 1} of ${range.count}`,
+          left,
+          doc.page.height - 36,
+          { width: contentWidth, align: 'center' }
+        );
+    }
 
     doc.end();
   } catch (err) {
